@@ -13,8 +13,9 @@ This script provides a complete WordPress migration solution that handles both f
 5. **Bidirectional Sync**: Supports both push (local → remote) and pull (remote → local) operations.
 6. **Security First**: Uses SSH keys and rclone's secure credential management.
 7. **Dry Run Mode**: Preview all changes before execution.
-8. **Backup Mode**: Create timestamped backups of remote WordPress sites.
-9. **Broad Compatibility**: Compatible with most WordPress setups, including WordOps and custom configurations.
+8. **Backup Mode**: Create basic backups of remote WordPress sites, with no compression, retention policy or restore funcionalities.
+9. **Production Safety**: Comprehensive logging, lock file management, and pre-flight validation.
+10. **Broad Compatibility**: Compatible with most WordPress setups, including WordOps and custom configurations.
 
 ## Requirements
 
@@ -173,6 +174,13 @@ The script performs a complete WordPress migration in the following steps:
 - **Backup manifest**: Creates `backup_info.txt` with backup details and contents
 - **Automatic cleanup**: Removes temporary database files from remote server
 
+### Production Safety Features
+- **Comprehensive logging**: All operations logged to timestamped files in `logs/` directory
+- **Lock file management**: Prevents concurrent migrations with automatic stale lock cleanup
+- **Pre-flight validation**: Checks disk space and write permissions before migration
+- **Operation tracking**: Detailed logs with INFO/SUCCESS/WARNING/ERROR levels
+- **Safe execution**: Early validation prevents partial migrations and data corruption
+
 ### Manual Restore from Backup
 To restore from a backup, use these manual steps:
 
@@ -278,6 +286,8 @@ wordpress-rclone-migrations/
 │   └── example.config            # Configuration template
 ├── backups/                      # Backup storage (created automatically)
 │   └── site1.dev-to-site1.com-a1b2c3d4_20241215_143022/
+├── logs/                         # Operation logs (created automatically)
+│   └── migration_20241215_143022.log
 └── README.md                     # This documentation
 ```
 

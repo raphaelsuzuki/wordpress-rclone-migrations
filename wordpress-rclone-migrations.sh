@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # WordPress Migration Script with rclone and SSH
+# Version: 1.1.0
 # Usage: ./wordpress-migrate.sh [--reverse] [--dry-run] [config-file]
 # No args: Run wizard to create config
 
@@ -16,6 +17,8 @@ DRY_RUN=false
 BACKUP=false
 BACKUP_DIR=""
 CONFIG_FILE=""
+LOG_FILE=""
+LOCK_FILE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -26,15 +29,155 @@ NC='\033[0m' # No Color
 
 # Cleanup function
 cleanup() {
+    remove_lock_file
     [[ -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
+    [[ -n "$LOG_FILE" ]] && log_to_file "INFO" "=== WordPress Migration Ended ==="
 }
 trap cleanup EXIT
 
 # Logging functions
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; log_to_file "INFO" "$1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; log_to_file "SUCCESS" "$1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; log_to_file "WARNING" "$1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; log_to_file "ERROR" "$1"; }
+
+# Enhanced logging functions
+log_to_file() {
+    local level="$1"
+    local message="$2"
+    [[ -n "$LOG_FILE" ]] && echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $message" >> "$LOG_FILE"
+}
+
+setup_logging() {
+    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local log_dir="$SCRIPT_DIR/logs"
+    mkdir -p "$log_dir"
+    LOG_FILE="$log_dir/migration_$timestamp.log"
+    log_to_file "INFO" "=== WordPress Migration Started ==="
+    log_to_file "INFO" "Script: $0"
+    log_to_file "INFO" "Arguments: $*"
+    log_to_file "INFO" "Working Directory: $(pwd)"
+    log_to_file "INFO" "User: $(whoami)"
+}
+
+# Lock file management
+create_lock_file() {
+    local config_name="$1"
+    LOCK_FILE="$TEMP_DIR/${config_name}.lock"
+    
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            log_error "Migration already running (PID: $lock_pid)"
+            log_error "Lock file: $LOCK_FILE"
+            exit 1
+        else
+            log_warning "Removing stale lock file: $LOCK_FILE"
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    
+    echo $$ > "$LOCK_FILE"
+    log_info "Created lock file: $LOCK_FILE (PID: $$)"
+}
+
+remove_lock_file() {
+    if [[ -f "$LOCK_FILE" ]]; then
+        rm -f "$LOCK_FILE"
+        log_info "Removed lock file: $LOCK_FILE"
+    fi
+}
+
+# Pre-flight validation
+validate_disk_space() {
+    local path="$1"
+    local required_mb="$2"
+    
+    log_info "Checking disk space for: $path"
+    
+    if [[ ! -d "$(dirname "$path")" ]]; then
+        log_error "Directory does not exist: $(dirname "$path")"
+        return 1
+    fi
+    
+    local available_kb=$(df "$(dirname "$path")" | awk 'NR==2 {print $4}')
+    local available_mb=$((available_kb / 1024))
+    
+    log_info "Available space: ${available_mb}MB, Required: ${required_mb}MB"
+    
+    if [[ $available_mb -lt $required_mb ]]; then
+        log_error "Insufficient disk space. Available: ${available_mb}MB, Required: ${required_mb}MB"
+        return 1
+    fi
+    
+    log_success "Disk space validation passed"
+    return 0
+}
+
+validate_permissions() {
+    local path="$1"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
+    
+    log_info "Validating write permissions for: $path"
+    
+    local test_file="$path/.wp-migration-test-$$"
+    local test_cmd="touch '$test_file' && rm -f '$test_file'"
+    
+    if [[ -n "$ssh_host" ]]; then
+        # Remote permission test
+        if [[ "$use_ssh_key" == "true" ]]; then
+            if ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
+                log_success "Remote write permissions validated"
+                return 0
+            fi
+        else
+            if sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
+                log_success "Remote write permissions validated"
+                return 0
+            fi
+        fi
+        log_error "No write permission for remote path: $path"
+        return 1
+    else
+        # Local permission test
+        if eval "$test_cmd" &>/dev/null; then
+            log_success "Local write permissions validated"
+            return 0
+        else
+            log_error "No write permission for local path: $path"
+            return 1
+        fi
+    fi
+}
+
+run_preflight_checks() {
+    log_info "Running pre-flight validation checks..."
+    
+    # Estimate required space (conservative: 1GB for safety)
+    local required_space_mb=1024
+    
+    if [[ "$REVERSE" == "true" ]]; then
+        # Reverse migration: check local space
+        if ! validate_disk_space "$src_wp_root" $required_space_mb; then
+            return 1
+        fi
+        if ! validate_permissions "$src_wp_content" "" "" "" "" ""; then
+            return 1
+        fi
+    else
+        # Normal migration: check remote space and permissions
+        if ! validate_permissions "$dest_wp_content" "$dest_ssh_host" "$dest_ssh_user" "$dest_ssh_key" "$dest_use_ssh_key" "${dest_ssh_pass:-}"; then
+            return 1
+        fi
+    fi
+    
+    log_success "All pre-flight checks passed"
+    return 0
+}
 
 # Parse command line arguments
 parse_args() {
@@ -851,6 +994,7 @@ EOF
 # Main function
 main() {
     parse_args "$@"
+    setup_logging "$@"
     check_dependencies
     
     if [[ -z "$CONFIG_FILE" ]]; then
@@ -859,10 +1003,17 @@ main() {
     else
         # Config file provided - run migration or backup
         load_config
+        create_lock_file "$(basename "$CONFIG_FILE")"
+        
         if [[ "$BACKUP" == "true" ]]; then
             run_backup
         else
-            run_migration
+            if run_preflight_checks; then
+                run_migration
+            else
+                log_error "Pre-flight checks failed. Migration aborted."
+                exit 1
+            fi
         fi
     fi
 }
