@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # WordPress Migration Script with rclone and SSH
-# Version: 1.1.0
-# Usage: ./wordpress-migrate.sh [--reverse] [--dry-run] [config-file]
-# No args: Run wizard to create config
+# Version: 2.0.0
+# Usage: ./script [push|pull] [subcommand] [options] [config-file]
+# No args: Run migration wizard to create config
 
 set -euo pipefail
 
@@ -11,14 +11,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wordpress-rclone-migrations"
 CONFIG_DIR="$DEFAULT_CONFIG_DIR"
-TEMP_DIR="/tmp/wp-migrate-$$"
-REVERSE=false
+TEMP_DIR="$(mktemp -d)"
+ACTION=""
+SUBCOMMAND=""
+SKIP_CONFIRMATION=false
 DRY_RUN=false
-BACKUP=false
-BACKUP_DIR=""
+
 CONFIG_FILE=""
 LOG_FILE=""
-LOCK_FILE=""
+LOCK_DIR=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -29,7 +30,7 @@ NC='\033[0m' # No Color
 
 # Cleanup function
 cleanup() {
-    remove_lock_file
+    remove_lock_dir
     [[ -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
     [[ -n "$LOG_FILE" ]] && log_to_file "INFO" "=== WordPress Migration Ended ==="
 }
@@ -60,31 +61,65 @@ setup_logging() {
     log_to_file "INFO" "User: $(whoami)"
 }
 
-# Lock file management
-create_lock_file() {
+# Atomic directory locking
+create_lock_dir() {
     local config_name="$1"
-    LOCK_FILE="$TEMP_DIR/${config_name}.lock"
+    local lock_base_dir="/tmp/wp-migrate-locks"
+    LOCK_DIR="$lock_base_dir/${config_name}.lock"
     
-    if [[ -f "$LOCK_FILE" ]]; then
-        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
-        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            log_error "Migration already running (PID: $lock_pid)"
-            log_error "Lock file: $LOCK_FILE"
-            exit 1
-        else
-            log_warning "Removing stale lock file: $LOCK_FILE"
-            rm -f "$LOCK_FILE"
+    # Ensure lock base directory exists
+    mkdir -p "$lock_base_dir"
+    
+    # Atomic lock creation - mkdir fails if directory exists
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$LOCK_DIR/timestamp"
+        log_info "Created lock directory: $LOCK_DIR (PID: $$)"
+    else
+        log_error "Migration already running for config: $config_name"
+        log_error "Lock directory: $LOCK_DIR"
+        # Show lock info if available
+        if [[ -f "$LOCK_DIR/pid" ]]; then
+            local lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+            local lock_time=$(cat "$LOCK_DIR/timestamp" 2>/dev/null)
+            log_error "Lock created by PID $lock_pid at $lock_time"
         fi
+        exit 1
     fi
-    
-    echo $$ > "$LOCK_FILE"
-    log_info "Created lock file: $LOCK_FILE (PID: $$)"
 }
 
-remove_lock_file() {
-    if [[ -f "$LOCK_FILE" ]]; then
-        rm -f "$LOCK_FILE"
-        log_info "Removed lock file: $LOCK_FILE"
+remove_lock_dir() {
+    if [[ -d "$LOCK_DIR" ]]; then
+        rm -rf "$LOCK_DIR"
+        log_info "Removed lock directory: $LOCK_DIR"
+    fi
+}
+
+# Confirmation function for safety
+confirm_operation() {
+    local operation="$1"
+    local source="$2"
+    local destination="$3"
+    local warning="$4"
+    
+    if [[ "$SKIP_CONFIRMATION" == "true" ]]; then
+        log_info "Skipping confirmation (-y flag)"
+        return 0
+    fi
+    
+    echo -e "\n${operation} CONFIRMATION"
+    echo "==================="
+    echo "Source:      $source"
+    echo "Destination: $destination"
+    echo -e "\nWARNING: $warning"
+    echo
+    read -p "Continue? [y/N]: " -r
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        return 0
+    else
+        log_info "Operation cancelled by user"
+        exit 0
     fi
 }
 
@@ -135,7 +170,7 @@ validate_permissions() {
                 return 0
             fi
         else
-            if sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
+            if SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
                 log_success "Remote write permissions validated"
                 return 0
             fi
@@ -144,7 +179,7 @@ validate_permissions() {
         return 1
     else
         # Local permission test
-        if eval "$test_cmd" &>/dev/null; then
+        if touch "$test_file" && rm -f "$test_file" &>/dev/null; then
             log_success "Local write permissions validated"
             return 0
         else
@@ -160,8 +195,8 @@ run_preflight_checks() {
     # Estimate required space (conservative: 1GB for safety)
     local required_space_mb=1024
     
-    if [[ "$REVERSE" == "true" ]]; then
-        # Reverse migration: check local space
+    if [[ "$ACTION" == "pull" ]]; then
+        # Pull operation: check local space and permissions
         if ! validate_disk_space "$src_wp_root" $required_space_mb; then
             return 1
         fi
@@ -169,7 +204,7 @@ run_preflight_checks() {
             return 1
         fi
     else
-        # Normal migration: check remote space and permissions
+        # Push operation: check remote space and permissions
         if ! validate_permissions "$dest_wp_content" "$dest_ssh_host" "$dest_ssh_user" "$dest_ssh_key" "$dest_use_ssh_key" "${dest_ssh_pass:-}"; then
             return 1
         fi
@@ -181,24 +216,51 @@ run_preflight_checks() {
 
 # Parse command line arguments
 parse_args() {
+    # First argument is the action (if provided)
+    if [[ $# -gt 0 ]]; then
+        case $1 in
+            push|pull)
+                ACTION="$1"
+                shift
+                # Check for subcommand (db/media)
+                if [[ $# -gt 0 && ("$1" == "db" || "$1" == "media") ]]; then
+                    SUBCOMMAND="$1"
+                    shift
+                fi
+                ;;
+            help|-h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                # If first arg is not an action, it might be a config file (old usage)
+                if [[ -f "$CONFIG_DIR/$1" || "$1" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+                    log_error "Old command syntax detected. Please use new syntax:"
+                    log_error "  Old: $0 $1"
+                    log_error "  New: $0 push $1"
+                    log_error "Run '$0 help' for updated usage."
+                    exit 1
+                else
+                    log_error "Unknown command: $1"
+                    log_error "Run '$0 help' for usage information."
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
+    
+    # Parse remaining options
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --reverse)
-                REVERSE=true
+            -y|--yes)
+                SKIP_CONFIRMATION=true
                 shift
                 ;;
             --dry-run)
                 DRY_RUN=true
                 shift
                 ;;
-            --backup)
-                BACKUP=true
-                shift
-                ;;
-            --backup-dir)
-                BACKUP_DIR="$2"
-                shift 2
-                ;;
+
             --config-dir)
                 CONFIG_DIR="$2"
                 shift 2
@@ -208,7 +270,12 @@ parse_args() {
                 exit 0
                 ;;
             *)
-                CONFIG_FILE="$1"
+                if [[ -z "$CONFIG_FILE" ]]; then
+                    CONFIG_FILE="$1"
+                else
+                    log_error "Unknown option: $1"
+                    exit 1
+                fi
                 shift
                 ;;
         esac
@@ -218,34 +285,45 @@ parse_args() {
 # Show help
 show_help() {
     cat << EOF
-WordPress Migration Script
+WordPress Migration Script v2.0.0
 
 Usage:
-  $0                           Run wizard to create migration config
-  $0 [options] <config-file>   Run migration with existing config
+  $0                                    Run migration wizard (create config)
+  $0 <action> [subcommand] [options] <config-file>   Run migration operations
+
+Actions:
+  push              Deploy local changes to remote (local → remote)
+  pull              Pull remote changes to local (remote → local)
+
+Subcommands:
+  db                Sync database only
+  media             Sync media files only (uploads directory)
 
 Options:
-  --reverse         Pull changes from remote to local
+  -y, --yes         Skip confirmation prompts (for automation)
   --dry-run         Show what would be done without executing
-  --backup          Create timestamped backup of remote site (files + database)
-  --backup-dir DIR  Specify backup directory (default: ./backups)
-  --config-dir DIR  Use custom config directory (default: ~/.config/wordpress-rclone-migrations)
+  --config-dir DIR  Use custom config directory
   -h, --help        Show this help message
 
 Examples:
   $0                                    # Create new migration config
-  $0 site.dev-to-site.com-a1b2c3d4     # Run migration
-  $0 --reverse site.dev-to-site.com-a1b2c3d4  # Pull from remote
-  $0 --dry-run site.dev-to-site.com-a1b2c3d4  # Preview changes
-  $0 --backup site.dev-to-site.com-a1b2c3d4   # Create backup
-  $0 --backup --backup-dir /backups site.dev-to-site.com-a1b2c3d4  # Custom backup location
-  $0 --config-dir ./configs site.dev-to-site.com-a1b2c3d4  # Use local configs
+  $0 push site.dev-to-site.com-a1b2c3d4        # Deploy everything
+  $0 push db site.dev-to-site.com-a1b2c3d4     # Deploy database only
+  $0 push media site.dev-to-site.com-a1b2c3d4  # Deploy media files only
+  $0 pull site.dev-to-site.com-a1b2c3d4        # Pull everything
+  $0 pull db site.dev-to-site.com-a1b2c3d4     # Pull database only
+  $0 pull media site.dev-to-site.com-a1b2c3d4  # Pull media files only
+  $0 push -y --dry-run site.dev-to-site.com-a1b2c3d4  # Preview deployment
+
+Migration workflow:
+  1. $0                                 # Create config
+  2. $0 push <config>                   # Deploy changes
 EOF
 }
 
 # Check dependencies
 check_dependencies() {
-    local deps=("rclone" "ssh")
+    local deps=("rclone" "ssh" "wp")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -258,12 +336,6 @@ check_dependencies() {
     if ! command -v "sshpass" &> /dev/null; then
         log_warning "sshpass not found - SSH password authentication will not be available"
         log_info "Install sshpass to enable SSH password authentication"
-    fi
-    
-    # Check for WP-CLI (required for database operations)
-    if ! command -v "wp" &> /dev/null; then
-        log_warning "WP-CLI not found locally - ensure it's installed on both source and destination servers"
-        log_info "Install WP-CLI locally for local WordPress operations"
     fi
     
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -298,7 +370,7 @@ test_ssh_password_connection() {
     
     log_info "Testing SSH password connection to $user@$host..."
     
-    if sshpass -p "$pass" ssh -o ConnectTimeout=10 -o BatchMode=yes -o PasswordAuthentication=yes "$user@$host" "echo 'SSH connection successful'" &>/dev/null; then
+    if SSHPASS="$pass" sshpass -e ssh -o ConnectTimeout=10 -o BatchMode=yes -o PasswordAuthentication=yes "$user@$host" "echo 'SSH connection successful'" &>/dev/null; then
         log_success "SSH connection successful"
         return 0
     else
@@ -344,7 +416,7 @@ test_wpcli_connection() {
             return 1
         fi
     else
-        if sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
+        if SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$test_cmd" &>/dev/null; then
             log_success "WP-CLI database connection successful"
             return 0
         else
@@ -683,11 +755,11 @@ export_database_wpcli() {
         if [[ "$use_ssh_key" == "true" ]]; then
             ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$export_cmd"
         else
-            sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$export_cmd"
+            SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$export_cmd"
         fi
     else
         # Local export
-        eval "$export_cmd"
+        (cd "$wp_root" && wp db export --gzip "$output_file")
     fi
     
     log_success "Database exported successfully"
@@ -717,11 +789,11 @@ import_database_wpcli() {
         if [[ "$use_ssh_key" == "true" ]]; then
             ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$import_cmd"
         else
-            sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$import_cmd"
+            SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$import_cmd"
         fi
     else
         # Local import
-        eval "$import_cmd"
+        (cd "$wp_root" && wp db import "$input_file")
     fi
     
     log_success "Database imported successfully"
@@ -757,7 +829,7 @@ replace_urls() {
                 return 1
             fi
         else
-            if sshpass -p "$ssh_pass" ssh "$ssh_user@$ssh_host" "$replace_cmd"; then
+            if SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$replace_cmd"; then
                 log_success "URL replacement completed using remote WP-CLI"
             else
                 log_error "Remote WP-CLI search-replace failed"
@@ -766,7 +838,7 @@ replace_urls() {
         fi
     else
         # Local URL replacement
-        if eval "$replace_cmd"; then
+        if (cd "$wp_root" && wp search-replace "$old_url" "$new_url" --skip-columns=guid); then
             log_success "URL replacement completed using local WP-CLI"
         else
             log_error "Local WP-CLI search-replace failed"
@@ -810,12 +882,12 @@ update_last_sync() {
 
 # Main migration function
 run_migration() {
-    log_info "Starting WordPress migration"
+    local sync_type="full"
+    [[ -n "$SUBCOMMAND" ]] && sync_type="$SUBCOMMAND"
+    
+    log_info "Starting WordPress migration ($sync_type)"
     [[ "$REVERSE" == "true" ]] && log_info "Running in REVERSE mode"
     [[ "$DRY_RUN" == "true" ]] && log_info "Running in DRY RUN mode"
-    
-    # Create temp directory
-    mkdir -p "$TEMP_DIR"
     
     # Set source and destination based on reverse flag
     if [[ "$REVERSE" == "true" ]]; then
@@ -838,9 +910,6 @@ run_migration() {
         
         OLD_URL="$destination_url"
         NEW_URL="$source_url"
-        
-        # File sync: remote -> local
-        sync_files "$dest_rclone_remote:$SRC_CONTENT" "$DEST_CONTENT"
     else
         # Normal: local -> remote
         SRC_ROOT="$src_wp_root"
@@ -861,135 +930,87 @@ run_migration() {
         
         OLD_URL="$source_url"
         NEW_URL="$destination_url"
+    fi
+    
+    # File synchronization (skip if db-only)
+    if [[ "$sync_type" != "db" ]]; then
+        local src_path="$SRC_CONTENT"
+        local dest_path="$DEST_CONTENT"
         
-        # File sync: local -> remote
-        sync_files "$SRC_CONTENT" "$dest_rclone_remote:$DEST_CONTENT"
-    fi
-    
-    # Database migration using WP-CLI
-    local db_dump="database.sql.gz"
-    
-    # Export source database
-    export_database_wpcli "$SRC_ROOT" "$SRC_SSH_HOST" "$SRC_SSH_USER" "$SRC_SSH_KEY" "$SRC_USE_SSH_KEY" "$SRC_SSH_PASS" "$db_dump"
-    
-    # Transfer database file if needed
-    if [[ "$REVERSE" == "true" ]]; then
-        # Transfer from remote to local
-        rclone copy "$dest_rclone_remote:$db_dump" "$TEMP_DIR/"
-        mv "$TEMP_DIR/$db_dump" "$DEST_ROOT/$db_dump"
-    else
-        # Transfer from local to remote
-        rclone copy "$SRC_ROOT/$db_dump" "$dest_rclone_remote:"
-    fi
-    
-    # Import to destination database
-    import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"
-    
-    # Replace URLs using WP-CLI
-    replace_urls "$DEST_ROOT" "$OLD_URL" "$NEW_URL" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
-    
-    # Clean up database file
-    if [[ "$DRY_RUN" != "true" ]]; then
-        if [[ -n "$DEST_SSH_HOST" ]]; then
-            # Remove from remote server
-            if [[ "$DEST_USE_SSH_KEY" == "true" ]]; then
-                ssh -i "$DEST_SSH_KEY" "$DEST_SSH_USER@$DEST_SSH_HOST" "rm -f '$DEST_ROOT/$db_dump'"
+        # Media-only sync: target uploads directory
+        if [[ "$sync_type" == "media" ]]; then
+            src_path="$SRC_CONTENT/uploads"
+            if [[ "$REVERSE" == "true" ]]; then
+                dest_path="$DEST_CONTENT/uploads"
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
             else
-                sshpass -p "$DEST_SSH_PASS" ssh "$DEST_SSH_USER@$DEST_SSH_HOST" "rm -f '$DEST_ROOT/$db_dump'"
+                dest_path="$DEST_CONTENT/uploads"
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
             fi
         else
-            # Remove from local
-            rm -f "$DEST_ROOT/$db_dump"
+            # Full file sync
+            if [[ "$REVERSE" == "true" ]]; then
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
+            else
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
+            fi
         fi
-        
-        # Remove from source if local
-        [[ -z "$SRC_SSH_HOST" ]] && rm -f "$SRC_ROOT/$db_dump"
     fi
     
-    # Fix permissions (only for normal migration to remote)
-    if [[ "$REVERSE" == "false" && "${fix_permissions:-true}" == "true" ]]; then
+    # Database migration (skip if media-only)
+    if [[ "$sync_type" != "media" ]]; then
+        local db_dump="database.sql.gz"
+        
+        # Export source database
+        export_database_wpcli "$SRC_ROOT" "$SRC_SSH_HOST" "$SRC_SSH_USER" "$SRC_SSH_KEY" "$SRC_USE_SSH_KEY" "$SRC_SSH_PASS" "$db_dump"
+        
+        # Transfer database file if needed
+        if [[ "$REVERSE" == "true" ]]; then
+            # Transfer from remote to local
+            rclone copy "$dest_rclone_remote:$db_dump" "$TEMP_DIR/"
+            mv "$TEMP_DIR/$db_dump" "$DEST_ROOT/$db_dump"
+        else
+            # Transfer from local to remote
+            rclone copy "$SRC_ROOT/$db_dump" "$dest_rclone_remote:"
+        fi
+        
+        # Import to destination database
+        import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"
+        
+        # Replace URLs using WP-CLI
+        replace_urls "$DEST_ROOT" "$OLD_URL" "$NEW_URL" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
+        
+        # Clean up database file
+        if [[ "$DRY_RUN" != "true" ]]; then
+            if [[ -n "$DEST_SSH_HOST" ]]; then
+                # Remove from remote server
+                if [[ "$DEST_USE_SSH_KEY" == "true" ]]; then
+                    ssh -i "$DEST_SSH_KEY" "$DEST_SSH_USER@$DEST_SSH_HOST" "rm -f '$DEST_ROOT/$db_dump'"
+                else
+                    SSHPASS="$DEST_SSH_PASS" sshpass -e ssh "$DEST_SSH_USER@$DEST_SSH_HOST" "rm -f '$DEST_ROOT/$db_dump'"
+                fi
+            else
+                # Remove from local
+                rm -f "$DEST_ROOT/$db_dump"
+            fi
+            
+            # Remove from source if local
+            [[ -z "$SRC_SSH_HOST" ]] && rm -f "$SRC_ROOT/$db_dump"
+        fi
+    fi
+    
+    # Fix permissions (only for normal migration to remote and not db-only)
+    if [[ "$REVERSE" == "false" && "${fix_permissions:-true}" == "true" && "$sync_type" != "db" ]]; then
         fix_file_permissions "$DEST_ROOT" "$dest_ssh_host" "$dest_ssh_user" "$dest_ssh_key" "$web_user" "$web_group"
     fi
     
     # Update last sync timestamp
     [[ "$DRY_RUN" == "false" ]] && update_last_sync
     
-    log_success "Migration completed successfully!"
+    log_success "Migration ($sync_type) completed successfully!"
 }
 
-# Backup function - creates timestamped backup of remote site
-run_backup() {
-    log_info "Starting WordPress backup from remote server"
-    [[ "$DRY_RUN" == "true" ]] && log_info "Running in DRY RUN mode"
-    
-    # Create backup directory with timestamp
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
-    local base_backup_dir="${BACKUP_DIR:-$SCRIPT_DIR/backups}"
-    local backup_dir="$base_backup_dir/$(basename "$CONFIG_FILE")_$timestamp"
-    
-    if [[ "$DRY_RUN" != "true" ]]; then
-        mkdir -p "$backup_dir"
-        log_info "Backup directory: $backup_dir"
-    else
-        log_info "[DRY RUN] Would create backup directory: $backup_dir"
-    fi
-    
-    # Backup files using rclone
-    log_info "Backing up files from remote server..."
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would backup files: $dest_rclone_remote:$dest_wp_content -> $backup_dir/files"
-    else
-        rclone copy "$dest_rclone_remote:$dest_wp_content" "$backup_dir/files" \
-            --progress \
-            --transfers=4 \
-            --checkers=8
-        log_success "Files backed up to: $backup_dir/files"
-    fi
-    
-    # Backup database using WP-CLI
-    log_info "Backing up database from remote server..."
-    local db_backup="backup_$timestamp.sql.gz"
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would export database to: $backup_dir/$db_backup"
-    else
-        # Export database on remote server
-        export_database_wpcli "$dest_wp_root" "$dest_ssh_host" "$dest_ssh_user" "$dest_ssh_key" "$dest_use_ssh_key" "${dest_ssh_pass:-}" "$db_backup"
-        
-        # Download database backup
-        rclone copy "$dest_rclone_remote:$db_backup" "$backup_dir/"
-        
-        # Clean up remote database file
-        if [[ "$dest_use_ssh_key" == "true" ]]; then
-            ssh -i "$dest_ssh_key" "$dest_ssh_user@$dest_ssh_host" "rm -f '$dest_wp_root/$db_backup'"
-        else
-            sshpass -p "${dest_ssh_pass}" ssh "$dest_ssh_user@$dest_ssh_host" "rm -f '$dest_wp_root/$db_backup'"
-        fi
-        
-        log_success "Database backed up to: $backup_dir/$db_backup"
-    fi
-    
-    # Create backup info file
-    if [[ "$DRY_RUN" != "true" ]]; then
-        cat > "$backup_dir/backup_info.txt" << EOF
-WordPress Backup Information
-============================
-Backup Date: $(date)
-Config File: $CONFIG_FILE
-Remote Host: $dest_ssh_host
-Remote Path: $dest_wp_root
-Source URL: $destination_url
 
-Contents:
-- files/: WordPress wp-content directory
-- $db_backup: Compressed database dump
-EOF
-        log_success "Backup info saved to: $backup_dir/backup_info.txt"
-    fi
-    
-    log_success "Backup completed successfully!"
-    [[ "$DRY_RUN" != "true" ]] && log_info "Backup location: $backup_dir"
-}
 
 # Main function
 main() {
@@ -997,25 +1018,60 @@ main() {
     setup_logging "$@"
     check_dependencies
     
-    if [[ -z "$CONFIG_FILE" ]]; then
-        # No config file provided - run wizard
-        run_wizard
-    else
-        # Config file provided - run migration or backup
-        load_config
-        create_lock_file "$(basename "$CONFIG_FILE")"
-        
-        if [[ "$BACKUP" == "true" ]]; then
-            run_backup
-        else
+    case "$ACTION" in
+        "")
+            # No action specified - run migration wizard
+            run_wizard
+            ;;
+        "push")
+            # Push: local → remote migration
+            if [[ -z "$CONFIG_FILE" ]]; then
+                log_error "Config file required for push operation"
+                log_info "Usage: $0 push [db|media] <config-file>"
+                exit 1
+            fi
+            load_config
+            local sync_desc="everything"
+            [[ "$SUBCOMMAND" == "db" ]] && sync_desc="database only"
+            [[ "$SUBCOMMAND" == "media" ]] && sync_desc="media files only"
+            confirm_operation "PUSH" "Local WordPress ($src_wp_root) - $sync_desc" "$dest_ssh_host:$dest_wp_root" "This will overwrite remote WordPress data!"
+            create_lock_dir "$(basename "$CONFIG_FILE")"
             if run_preflight_checks; then
                 run_migration
             else
-                log_error "Pre-flight checks failed. Migration aborted."
+                log_error "Pre-flight checks failed. Push aborted."
                 exit 1
             fi
-        fi
-    fi
+            ;;
+        "pull")
+            # Pull: remote → local migration
+            if [[ -z "$CONFIG_FILE" ]]; then
+                log_error "Config file required for pull operation"
+                log_info "Usage: $0 pull [db|media] <config-file>"
+                exit 1
+            fi
+            load_config
+            local sync_desc="everything"
+            [[ "$SUBCOMMAND" == "db" ]] && sync_desc="database only"
+            [[ "$SUBCOMMAND" == "media" ]] && sync_desc="media files only"
+            confirm_operation "PULL" "$dest_ssh_host:$dest_wp_root - $sync_desc" "Local WordPress ($src_wp_root)" "This will overwrite local WordPress data!"
+            create_lock_dir "$(basename "$CONFIG_FILE")"
+            # Set reverse flag for pull operation
+            REVERSE=true
+            if run_preflight_checks; then
+                run_migration
+            else
+                log_error "Pre-flight checks failed. Pull aborted."
+                exit 1
+            fi
+            ;;
+
+        *)
+            log_error "Unknown action: $ACTION"
+            log_info "Run '$0 help' for usage information."
+            exit 1
+            ;;
+    esac
 }
 
 # Run main function

@@ -2,7 +2,7 @@
 
 Fast, secure, and reliable WordPress migrations using rclone and SSH with minimal dependencies.
 
-This script provides a complete WordPress migration solution that handles both files and databases. With wizard-driven configuration and bidirectional sync capabilities, it offers the best combination of security, reliability, and ease of use for WordPress site migrations.
+This script provides a complete WordPress migration solution that handles both files and databases. With wizard-driven configuration, bidirectional sync capabilities, and selective sync options, it offers the best combination of security, reliability, and ease of use for WordPress site migrations.
 
 ## Overview
 
@@ -11,9 +11,9 @@ This script provides a complete WordPress migration solution that handles both f
 3. **File Synchronization**: Uses rclone for incremental file transfers with smart exclusions.
 4. **Database Migration**: Creates SQL dumps with URL replacement for seamless site transitions.
 5. **Bidirectional Sync**: Supports both push (local → remote) and pull (remote → local) operations.
-6. **Security First**: Uses SSH keys and rclone's secure credential management.
-7. **Dry Run Mode**: Preview all changes before execution.
-8. **Backup Mode**: Create basic backups of remote WordPress sites, with no compression, retention policy or restore funcionalities.
+6. **Selective Sync**: Database-only or media-only sync for targeted updates.
+7. **Security First**: Uses SSH keys and rclone's secure credential management.
+8. **Dry Run Mode**: Preview all changes before execution.
 9. **Production Safety**: Comprehensive logging, lock file management, and pre-flight validation.
 10. **Broad Compatibility**: Compatible with most WordPress setups, including WordOps and custom configurations.
 
@@ -63,32 +63,41 @@ This script provides a complete WordPress migration solution that handles both f
    ./wordpress-rclone-migrations.sh
    ```
 
-2. **Execute migrations** using the generated config:
+2. **Execute operations** using the generated config:
    ```bash
-   # Normal migration (local → remote)
-   ./wordpress-rclone-migrations.sh site.dev-to-site.com-a1b2c3d4
+   # Deploy local changes to remote
+   ./wordpress-rclone-migrations.sh push site.dev-to-site.com-a1b2c3d4
    
-   # Pull from remote (remote → local)
-   ./wordpress-rclone-migrations.sh --reverse site.dev-to-site.com-a1b2c3d4
+   # Deploy database only
+   ./wordpress-rclone-migrations.sh push db site.dev-to-site.com-a1b2c3d4
+   
+   # Deploy media files only
+   ./wordpress-rclone-migrations.sh push media site.dev-to-site.com-a1b2c3d4
+   
+   # Pull remote changes to local
+   ./wordpress-rclone-migrations.sh pull site.dev-to-site.com-a1b2c3d4
+   
+   # Pull database only
+   ./wordpress-rclone-migrations.sh pull db site.dev-to-site.com-a1b2c3d4
+   
+   # Pull media files only
+   ./wordpress-rclone-migrations.sh pull media site.dev-to-site.com-a1b2c3d4
    
    # Preview changes without executing
-   ./wordpress-rclone-migrations.sh --dry-run site.dev-to-site.com-a1b2c3d4
+   ./wordpress-rclone-migrations.sh push --dry-run site.dev-to-site.com-a1b2c3d4
    
-   # Create backup of remote site
-   ./wordpress-rclone-migrations.sh --backup site.dev-to-site.com-a1b2c3d4
-   
-   # Create backup in custom location
-   ./wordpress-rclone-migrations.sh --backup --backup-dir /path/to/backups site.dev-to-site.com-a1b2c3d4
+   # Skip confirmation prompts (for automation)
+   ./wordpress-rclone-migrations.sh push -y site.dev-to-site.com-a1b2c3d4
    ```
 
 3. **View help** for all available options:
    ```bash
-   ./wordpress-rclone-migrations.sh --help
+   ./wordpress-rclone-migrations.sh help
    ```
 
 ## Configuration
 
-The script uses configuration files stored in the `configs/` directory. Each migration gets a unique config file named `source-to-destination-hash`.
+The script uses configuration files stored in user's config directory. Example configurations are provided in the `config-examples/` directory.
 
 ### Wizard Configuration
 
@@ -151,6 +160,7 @@ The script performs a complete WordPress migration in the following steps:
 
 ### File Synchronization
 - **wp-content focus**: Syncs wp-content directories by default (themes, plugins, uploads)
+- **Selective sync**: Database-only, media-only, or full sync options
 - **Incremental sync**: Only transfers changed files using rclone
 - **Smart exclusions**: Skips cache, logs, and development files by default
 - **Permission preservation**: Maintains file timestamps and permissions
@@ -167,12 +177,7 @@ The script performs a complete WordPress migration in the following steps:
   - Preserves post GUIDs (skips guid column)
 - **Localhost MySQL support**: Works with databases that only listen on localhost
 
-### Backup Process
-- **Timestamped backups**: Creates backups with `YYYYMMDD_HHMMSS` format
-- **Complete site backup**: Includes both wp-content files and compressed database
-- **User-configurable location**: Saves backups to specified directory or `./backups/` by default
-- **Backup manifest**: Creates `backup_info.txt` with backup details and contents
-- **Automatic cleanup**: Removes temporary database files from remote server
+
 
 ### Production Safety Features
 - **Comprehensive logging**: All operations logged to timestamped files in `logs/` directory
@@ -181,23 +186,7 @@ The script performs a complete WordPress migration in the following steps:
 - **Operation tracking**: Detailed logs with INFO/SUCCESS/WARNING/ERROR levels
 - **Safe execution**: Early validation prevents partial migrations and data corruption
 
-### Manual Restore from Backup
-To restore from a backup, use these manual steps:
 
-```bash
-# 1. Restore files
-rsync -av /path/to/backup/files/ /var/www/html/wp-content/
-
-# 2. Restore database
-cd /var/www/html
-wp db import /path/to/backup/backup_YYYYMMDD_HHMMSS.sql.gz
-
-# 3. Fix URLs if restoring to different domain
-wp search-replace 'https://old-domain.com' 'https://new-domain.com'
-
-# 4. Fix file permissions if needed
-sudo chown -R www-data:www-data /var/www/html/wp-content
-```
 
 ### Default Exclusions
 - Log files (`*.log`)
@@ -210,47 +199,38 @@ sudo chown -R www-data:www-data /var/www/html/wp-content
 
 **The script prioritizes security in all operations:**
 
-- **SSH Key Authentication**: No passwords transmitted or stored
+- **SSH Key Authentication**: Preferred method with no passwords transmitted or stored
+- **Secure Password Handling**: SSH passwords use environment variables to avoid process list exposure
 - **rclone Credential Management**: SSH credentials stored securely in rclone config
 - **Runtime Credential Extraction**: Database passwords never stored in config files
 - **Secure Config Files**: Migration configs have 600 permissions
 - **Connection Validation**: Tests all connections before migration
 - **Encrypted Transfers**: All data transmitted over encrypted SSH connections
 
-## WordPress Setup Support
+## Command Reference
+
+### Actions
+- **push**: Deploy local changes to remote (local → remote)
+- **pull**: Pull remote changes to local (remote → local)
+
+### Subcommands
+- **db**: Sync database only
+- **media**: Sync media files only (uploads directory)
+
+### Options
+- **-y, --yes**: Skip confirmation prompts (for automation)
+- **--dry-run**: Preview changes without executing
+- **--config-dir DIR**: Use custom config directory
+
+### WordPress Setup Support
 
 The script works with any WordPress configuration by specifying exact paths:
 
-### Standard WordPress
-```ini
-wp_root=/var/www/html
-wp_content=/var/www/html/wp-content
-wp_config=/var/www/html/wp-config.php
-```
-
-### WordOps
-```ini
-wp_root=/var/www/site.com/htdocs
-wp_content=/var/www/site.com/htdocs/wp-content
-wp_config=/var/www/site.com/wp-config.php
-```
-
-### Bedrock
-```ini
-wp_root=/var/www/site/web
-wp_content=/var/www/site/web/app
-wp_config=/var/www/site/config/application.php
-```
-
-### Flywheel Local
-```ini
-wp_root=/Users/username/Local Sites/mysite/app/public
-wp_content=/Users/username/Local Sites/mysite/app/public/wp-content
-wp_config=/Users/username/Local Sites/mysite/app/public/wp-config.php
-```
-
-### Custom Structures
-Specify exact paths for each component during wizard setup.
+**Standard WordPress**: `/var/www/html`  
+**WordOps**: `/var/www/site.com/htdocs`  
+**Bedrock**: `/var/www/site/web` with config in `/var/www/site/config/`  
+**Flywheel Local**: `/Users/username/Local Sites/mysite/app/public`  
+**Custom**: Specify exact paths during wizard setup
 
 ## Advanced Configuration
 
@@ -279,13 +259,8 @@ web_group=www-data
 ```
 wordpress-rclone-migrations/
 ├── wordpress-rclone-migrations.sh # Main migration script
-├── test-setup.sh                 # Dependency validation script
-├── configs/                      # Migration configurations
-│   ├── site1.dev-to-site1.com-a1b2c3d4
-│   ├── site2.dev-to-site2.com-b2c3d4e5
-│   └── example.config            # Configuration template
-├── backups/                      # Backup storage (created automatically)
-│   └── site1.dev-to-site1.com-a1b2c3d4_20241215_143022/
+├── config-examples/              # Example configurations
+│   └── flywheel-local-to-wordops.config
 ├── logs/                         # Operation logs (created automatically)
 │   └── migration_20241215_143022.log
 └── README.md                     # This documentation
@@ -300,15 +275,14 @@ wordpress-rclone-migrations/
 - **Permission denied**: Ensure script can read WordPress files and write to temp directories
 - **wp-config.php not found**: Check file paths, especially for WordOps/Bedrock setups
 - **URL replacement fails**: Verify source and destination URLs are correctly specified
-- **Dependency missing**: Run `./test-setup.sh` to validate all required tools
+- **Old command syntax**: Use new action-based commands (push/pull instead of flags)
 
 ### Debug Steps
 
-1. **Test setup**: `./test-setup.sh`
-2. **Dry run**: `./wordpress-rclone-migrations.sh --dry-run config-file`
-3. **Manual SSH test**: `ssh -i ~/.ssh/id_rsa user@hostname`
-4. **rclone test**: `rclone lsd remote-name:`
-5. **WP-CLI test**: `ssh user@hostname "cd /wp/root && wp db check"`
+1. **Dry run**: `./wordpress-rclone-migrations.sh push --dry-run config-file`
+2. **Manual SSH test**: `ssh -i ~/.ssh/id_rsa user@hostname`
+3. **rclone test**: `rclone lsd remote-name:`
+4. **WP-CLI test**: `ssh user@hostname "cd /wp/root && wp db check"`
 
 ## Contributing
 
@@ -318,10 +292,23 @@ Pull requests and suggestions are welcome! Please see [CONTRIBUTING.md](CONTRIBU
 - Development workflow
 - Testing requirements
 
+## Migration Workflow
+
+```bash
+# 1. Create configuration
+./wordpress-rclone-migrations.sh
+
+# 2. Deploy changes (full or selective)
+./wordpress-rclone-migrations.sh push site.dev-to-site.com-a1b2c3d4        # Everything
+./wordpress-rclone-migrations.sh push db site.dev-to-site.com-a1b2c3d4     # Database only
+./wordpress-rclone-migrations.sh push media site.dev-to-site.com-a1b2c3d4  # Media only
+```
+
 This script focuses on:
 - **Fast**: Incremental sync, parallel transfers
 - **Secure**: SSH keys, encrypted connections, secure credential storage  
 - **Reliable**: Connection testing, atomic operations, error handling
+- **Safe**: Confirmation prompts, dry-run mode, comprehensive logging
 
 ## License
 
