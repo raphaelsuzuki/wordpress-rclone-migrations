@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2024-12-15
+
+### Added
+- **Plugins and themes sync**: New subcommands for selective component synchronization
+- **Configurable directory paths**: Support for custom uploads, plugins, and themes directories
+- **Custom path wizard prompts**: Optional directory configuration during setup
+- **Non-standard WordPress support**: Handle custom WP_CONTENT_DIR and WP_PLUGIN_DIR setups
+
+### Commands
+```bash
+./script push plugins config-file    # Deploy plugins only
+./script push themes config-file     # Deploy themes only
+./script pull plugins config-file    # Pull plugins only
+./script pull themes config-file     # Pull themes only
+```
+
+### Configuration
+```ini
+[paths]
+src_uploads_dir=/custom/uploads
+src_plugins_dir=/custom/plugins
+src_themes_dir=/custom/themes
+dest_uploads_dir=/var/www/site/uploads
+dest_plugins_dir=/var/www/site/plugins
+dest_themes_dir=/var/www/site/themes
+```
+
+### Enhanced
+- Updated documentation with new features and examples
+- Improved config examples with custom paths section
+- Maintained backward compatibility with standard wp-content structure
+
 ## [2.0.0] - 2024-12-15
 
 ### Added

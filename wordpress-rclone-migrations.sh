@@ -222,8 +222,8 @@ parse_args() {
             push|pull)
                 ACTION="$1"
                 shift
-                # Check for subcommand (db/media)
-                if [[ $# -gt 0 && ("$1" == "db" || "$1" == "media") ]]; then
+                # Check for subcommand (db/media/plugins/themes)
+                if [[ $# -gt 0 && ("$1" == "db" || "$1" == "media" || "$1" == "plugins" || "$1" == "themes") ]]; then
                     SUBCOMMAND="$1"
                     shift
                 fi
@@ -298,6 +298,8 @@ Actions:
 Subcommands:
   db                Sync database only
   media             Sync media files only (uploads directory)
+  plugins           Sync plugins only (plugins directory)
+  themes            Sync themes only (themes directory)
 
 Options:
   -y, --yes         Skip confirmation prompts (for automation)
@@ -310,9 +312,13 @@ Examples:
   $0 push site.dev-to-site.com-a1b2c3d4        # Deploy everything
   $0 push db site.dev-to-site.com-a1b2c3d4     # Deploy database only
   $0 push media site.dev-to-site.com-a1b2c3d4  # Deploy media files only
+  $0 push plugins site.dev-to-site.com-a1b2c3d4 # Deploy plugins only
+  $0 push themes site.dev-to-site.com-a1b2c3d4  # Deploy themes only
   $0 pull site.dev-to-site.com-a1b2c3d4        # Pull everything
   $0 pull db site.dev-to-site.com-a1b2c3d4     # Pull database only
   $0 pull media site.dev-to-site.com-a1b2c3d4  # Pull media files only
+  $0 pull plugins site.dev-to-site.com-a1b2c3d4 # Pull plugins only
+  $0 pull themes site.dev-to-site.com-a1b2c3d4  # Pull themes only
   $0 push -y --dry-run site.dev-to-site.com-a1b2c3d4  # Preview deployment
 
 Migration workflow:
@@ -560,6 +566,16 @@ run_wizard() {
     read -p "Source URL (e.g., https://site.dev): " SOURCE_URL
     read -p "Destination URL (e.g., https://site.com): " DEST_URL
     
+    # Custom directory paths (optional)
+    echo -e "${BLUE}=== Custom Directory Paths (Optional) ===${NC}"
+    echo "Leave blank to use defaults (wp-content/uploads, wp-content/plugins, wp-content/themes)"
+    read -p "Source uploads directory: " -e SRC_UPLOADS_CUSTOM
+    read -p "Source plugins directory: " -e SRC_PLUGINS_CUSTOM
+    read -p "Source themes directory: " -e SRC_THEMES_CUSTOM
+    read -p "Destination uploads directory: " -e DEST_UPLOADS_CUSTOM
+    read -p "Destination plugins directory: " -e DEST_PLUGINS_CUSTOM
+    read -p "Destination themes directory: " -e DEST_THEMES_CUSTOM
+    
     # Sync options
     echo -e "${BLUE}=== Sync Options ===${NC}"
     read -p "Exclude patterns (comma-separated): " -e -i "*.log,cache/*,node_modules/*,/.git/*" EXCLUDE_PATTERNS
@@ -624,6 +640,20 @@ rclone_flags=--transfers=4 --checkers=8 --progress
 last_sync=never
 EOF
     
+    # Add custom paths section if any custom paths were specified
+    if [[ -n "$SRC_UPLOADS_CUSTOM" || -n "$SRC_PLUGINS_CUSTOM" || -n "$SRC_THEMES_CUSTOM" || -n "$DEST_UPLOADS_CUSTOM" || -n "$DEST_PLUGINS_CUSTOM" || -n "$DEST_THEMES_CUSTOM" ]]; then
+        cat >> "$config_path" << EOF
+
+[paths]
+EOF
+        [[ -n "$SRC_UPLOADS_CUSTOM" ]] && echo "src_uploads_dir=$SRC_UPLOADS_CUSTOM" >> "$config_path"
+        [[ -n "$SRC_PLUGINS_CUSTOM" ]] && echo "src_plugins_dir=$SRC_PLUGINS_CUSTOM" >> "$config_path"
+        [[ -n "$SRC_THEMES_CUSTOM" ]] && echo "src_themes_dir=$SRC_THEMES_CUSTOM" >> "$config_path"
+        [[ -n "$DEST_UPLOADS_CUSTOM" ]] && echo "dest_uploads_dir=$DEST_UPLOADS_CUSTOM" >> "$config_path"
+        [[ -n "$DEST_PLUGINS_CUSTOM" ]] && echo "dest_plugins_dir=$DEST_PLUGINS_CUSTOM" >> "$config_path"
+        [[ -n "$DEST_THEMES_CUSTOM" ]] && echo "dest_themes_dir=$DEST_THEMES_CUSTOM" >> "$config_path"
+    fi
+    
     # Set secure permissions
     chmod 600 "$config_path"
     
@@ -681,9 +711,20 @@ load_config() {
                 "options")
                     declare -g "${key}"="$value"
                     ;;
+                "paths")
+                    declare -g "${key}"="$value"
+                    ;;
             esac
         fi
     done < "$config_path"
+    
+    # Set default paths if not specified in config
+    [[ -z "${src_uploads_dir:-}" ]] && src_uploads_dir="$src_wp_content/uploads"
+    [[ -z "${src_plugins_dir:-}" ]] && src_plugins_dir="$src_wp_content/plugins"
+    [[ -z "${src_themes_dir:-}" ]] && src_themes_dir="$src_wp_content/themes"
+    [[ -z "${dest_uploads_dir:-}" ]] && dest_uploads_dir="$dest_wp_content/uploads"
+    [[ -z "${dest_plugins_dir:-}" ]] && dest_plugins_dir="$dest_wp_content/plugins"
+    [[ -z "${dest_themes_dir:-}" ]] && dest_themes_dir="$dest_wp_content/themes"
     
     log_info "Loaded configuration: $CONFIG_FILE"
     
@@ -894,6 +935,9 @@ run_migration() {
         # Reverse: remote -> local
         SRC_ROOT="$dest_wp_root"
         SRC_CONTENT="$dest_wp_content"
+        SRC_UPLOADS="$dest_uploads_dir"
+        SRC_PLUGINS="$dest_plugins_dir"
+        SRC_THEMES="$dest_themes_dir"
         SRC_SSH_HOST="$dest_ssh_host"
         SRC_SSH_USER="$dest_ssh_user"
         SRC_SSH_KEY="$dest_ssh_key"
@@ -902,6 +946,9 @@ run_migration() {
         
         DEST_ROOT="$src_wp_root"
         DEST_CONTENT="$src_wp_content"
+        DEST_UPLOADS="$src_uploads_dir"
+        DEST_PLUGINS="$src_plugins_dir"
+        DEST_THEMES="$src_themes_dir"
         DEST_SSH_HOST=""
         DEST_SSH_USER=""
         DEST_SSH_KEY=""
@@ -914,6 +961,9 @@ run_migration() {
         # Normal: local -> remote
         SRC_ROOT="$src_wp_root"
         SRC_CONTENT="$src_wp_content"
+        SRC_UPLOADS="$src_uploads_dir"
+        SRC_PLUGINS="$src_plugins_dir"
+        SRC_THEMES="$src_themes_dir"
         SRC_SSH_HOST=""
         SRC_SSH_USER=""
         SRC_SSH_KEY=""
@@ -922,6 +972,9 @@ run_migration() {
         
         DEST_ROOT="$dest_wp_root"
         DEST_CONTENT="$dest_wp_content"
+        DEST_UPLOADS="$dest_uploads_dir"
+        DEST_PLUGINS="$dest_plugins_dir"
+        DEST_THEMES="$dest_themes_dir"
         DEST_SSH_HOST="$dest_ssh_host"
         DEST_SSH_USER="$dest_ssh_user"
         DEST_SSH_KEY="$dest_ssh_key"
@@ -937,28 +990,46 @@ run_migration() {
         local src_path="$SRC_CONTENT"
         local dest_path="$DEST_CONTENT"
         
-        # Media-only sync: target uploads directory
+        # Selective sync: target specific directories
         if [[ "$sync_type" == "media" ]]; then
-            src_path="$SRC_CONTENT/uploads"
+            src_path="$SRC_UPLOADS"
             if [[ "$REVERSE" == "true" ]]; then
-                dest_path="$DEST_CONTENT/uploads"
-                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
+                dest_path="$DEST_UPLOADS"
+                sync_files "$rclone_remote:$src_path" "$dest_path"
             else
-                dest_path="$DEST_CONTENT/uploads"
-                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
+                dest_path="$DEST_UPLOADS"
+                sync_files "$src_path" "$rclone_remote:$dest_path"
+            fi
+        elif [[ "$sync_type" == "plugins" ]]; then
+            src_path="$SRC_PLUGINS"
+            if [[ "$REVERSE" == "true" ]]; then
+                dest_path="$DEST_PLUGINS"
+                sync_files "$rclone_remote:$src_path" "$dest_path"
+            else
+                dest_path="$DEST_PLUGINS"
+                sync_files "$src_path" "$rclone_remote:$dest_path"
+            fi
+        elif [[ "$sync_type" == "themes" ]]; then
+            src_path="$SRC_THEMES"
+            if [[ "$REVERSE" == "true" ]]; then
+                dest_path="$DEST_THEMES"
+                sync_files "$rclone_remote:$src_path" "$dest_path"
+            else
+                dest_path="$DEST_THEMES"
+                sync_files "$src_path" "$rclone_remote:$dest_path"
             fi
         else
             # Full file sync
             if [[ "$REVERSE" == "true" ]]; then
-                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
+                sync_files "$rclone_remote:$src_path" "$dest_path"
             else
-                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
+                sync_files "$src_path" "$rclone_remote:$dest_path"
             fi
         fi
     fi
     
-    # Database migration (skip if media-only)
-    if [[ "$sync_type" != "media" ]]; then
+    # Database migration (skip if files-only)
+    if [[ "$sync_type" != "media" && "$sync_type" != "plugins" && "$sync_type" != "themes" ]]; then
         local db_dump="database.sql.gz"
         
         # Export source database
@@ -967,11 +1038,11 @@ run_migration() {
         # Transfer database file if needed
         if [[ "$REVERSE" == "true" ]]; then
             # Transfer from remote to local
-            rclone copy "$dest_rclone_remote:$db_dump" "$TEMP_DIR/"
+            rclone copy "$rclone_remote:$db_dump" "$TEMP_DIR/"
             mv "$TEMP_DIR/$db_dump" "$DEST_ROOT/$db_dump"
         else
             # Transfer from local to remote
-            rclone copy "$SRC_ROOT/$db_dump" "$dest_rclone_remote:"
+            rclone copy "$SRC_ROOT/$db_dump" "$rclone_remote:"
         fi
         
         # Import to destination database
@@ -1027,13 +1098,15 @@ main() {
             # Push: local → remote migration
             if [[ -z "$CONFIG_FILE" ]]; then
                 log_error "Config file required for push operation"
-                log_info "Usage: $0 push [db|media] <config-file>"
+                log_info "Usage: $0 push [db|media|plugins|themes] <config-file>"
                 exit 1
             fi
             load_config
             local sync_desc="everything"
             [[ "$SUBCOMMAND" == "db" ]] && sync_desc="database only"
             [[ "$SUBCOMMAND" == "media" ]] && sync_desc="media files only"
+            [[ "$SUBCOMMAND" == "plugins" ]] && sync_desc="plugins only"
+            [[ "$SUBCOMMAND" == "themes" ]] && sync_desc="themes only"
             confirm_operation "PUSH" "Local WordPress ($src_wp_root) - $sync_desc" "$dest_ssh_host:$dest_wp_root" "This will overwrite remote WordPress data!"
             create_lock_dir "$(basename "$CONFIG_FILE")"
             if run_preflight_checks; then
@@ -1047,13 +1120,15 @@ main() {
             # Pull: remote → local migration
             if [[ -z "$CONFIG_FILE" ]]; then
                 log_error "Config file required for pull operation"
-                log_info "Usage: $0 pull [db|media] <config-file>"
+                log_info "Usage: $0 pull [db|media|plugins|themes] <config-file>"
                 exit 1
             fi
             load_config
             local sync_desc="everything"
             [[ "$SUBCOMMAND" == "db" ]] && sync_desc="database only"
             [[ "$SUBCOMMAND" == "media" ]] && sync_desc="media files only"
+            [[ "$SUBCOMMAND" == "plugins" ]] && sync_desc="plugins only"
+            [[ "$SUBCOMMAND" == "themes" ]] && sync_desc="themes only"
             confirm_operation "PULL" "$dest_ssh_host:$dest_wp_root - $sync_desc" "Local WordPress ($src_wp_root)" "This will overwrite local WordPress data!"
             create_lock_dir "$(basename "$CONFIG_FILE")"
             # Set reverse flag for pull operation

@@ -74,6 +74,12 @@ This script provides a complete WordPress migration solution that handles both f
    # Deploy media files only
    ./wordpress-rclone-migrations.sh push media site.dev-to-site.com-a1b2c3d4
    
+   # Deploy plugins only
+   ./wordpress-rclone-migrations.sh push plugins site.dev-to-site.com-a1b2c3d4
+   
+   # Deploy themes only
+   ./wordpress-rclone-migrations.sh push themes site.dev-to-site.com-a1b2c3d4
+   
    # Pull remote changes to local
    ./wordpress-rclone-migrations.sh pull site.dev-to-site.com-a1b2c3d4
    
@@ -82,6 +88,12 @@ This script provides a complete WordPress migration solution that handles both f
    
    # Pull media files only
    ./wordpress-rclone-migrations.sh pull media site.dev-to-site.com-a1b2c3d4
+   
+   # Pull plugins only
+   ./wordpress-rclone-migrations.sh pull plugins site.dev-to-site.com-a1b2c3d4
+   
+   # Pull themes only
+   ./wordpress-rclone-migrations.sh pull themes site.dev-to-site.com-a1b2c3d4
    
    # Preview changes without executing
    ./wordpress-rclone-migrations.sh push --dry-run site.dev-to-site.com-a1b2c3d4
@@ -150,6 +162,15 @@ web_user=www-data
 web_group=www-data
 rclone_flags=--transfers=4 --checkers=8 --progress
 last_sync=2024-01-15T10:30:00Z
+
+# Optional: Custom directory paths for non-standard WordPress setups
+[paths]
+src_uploads_dir=/custom/uploads
+src_plugins_dir=/custom/plugins
+src_themes_dir=/custom/themes
+dest_uploads_dir=/var/www/site/uploads
+dest_plugins_dir=/var/www/site/plugins
+dest_themes_dir=/var/www/site/themes
 ```
 
 **Note**: Database operations use WP-CLI which automatically reads credentials from wp-config.php files.
@@ -216,6 +237,8 @@ The script performs a complete WordPress migration in the following steps:
 ### Subcommands
 - **db**: Sync database only
 - **media**: Sync media files only (uploads directory)
+- **plugins**: Sync plugins only (plugins directory)
+- **themes**: Sync themes only (themes directory)
 
 ### Options
 - **-y, --yes**: Skip confirmation prompts (for automation)
@@ -231,6 +254,30 @@ The script works with any WordPress configuration by specifying exact paths:
 **Bedrock**: `/var/www/site/web` with config in `/var/www/site/config/`  
 **Flywheel Local**: `/Users/username/Local Sites/mysite/app/public`  
 **Custom**: Specify exact paths during wizard setup
+
+### Custom Directory Paths
+
+For non-standard WordPress setups with custom plugin, theme, or upload directories, you can override the default paths:
+
+**During wizard setup**: Specify custom directory paths when prompted
+
+**In config file**: Add `[paths]` section with custom directories:
+```ini
+[paths]
+src_uploads_dir=/custom/uploads
+src_plugins_dir=/app/plugins
+src_themes_dir=/app/themes
+dest_uploads_dir=/var/www/uploads
+dest_plugins_dir=/var/www/plugins
+dest_themes_dir=/var/www/themes
+```
+
+**Supports WordPress constants**:
+- `WP_CONTENT_DIR` - Custom content directory
+- `WP_PLUGIN_DIR` - Custom plugins directory
+- `UPLOADS` - Custom uploads directory
+
+**Automatic fallbacks**: Uses standard `wp-content/` subdirectories if not specified
 
 ## Advanced Configuration
 
@@ -302,6 +349,8 @@ Pull requests and suggestions are welcome! Please see [CONTRIBUTING.md](CONTRIBU
 ./wordpress-rclone-migrations.sh push site.dev-to-site.com-a1b2c3d4        # Everything
 ./wordpress-rclone-migrations.sh push db site.dev-to-site.com-a1b2c3d4     # Database only
 ./wordpress-rclone-migrations.sh push media site.dev-to-site.com-a1b2c3d4  # Media only
+./wordpress-rclone-migrations.sh push plugins site.dev-to-site.com-a1b2c3d4 # Plugins only
+./wordpress-rclone-migrations.sh push themes site.dev-to-site.com-a1b2c3d4  # Themes only
 ```
 
 This script focuses on:
