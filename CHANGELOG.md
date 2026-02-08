@@ -13,11 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CRITICAL**: Added config file permission validation when loading (must be mode 600)
 - Fixed syntax error in validate_search_replace_input error message (unescaped backtick)
 - Enhanced defense-in-depth with explicit chmod after config file operations
+- Added warnings during wizard when using SSH password authentication
+- Emphasized SSH key authentication as the recommended secure method
+
+### Performance
+- Replaced inefficient sed calls with bash parameter expansion for URL parsing
+- Reduced external command invocations in config filename generation
+
+### Documentation
+- Enhanced security section in README with best practices
+- Added emphasis on SSH key authentication over passwords
+- Documented security recommendations for config file management
 
 ### Improved
 - Config files now created with secure permissions from the start
 - Better error messages for insecure config file permissions
 - More robust permission handling throughout config lifecycle
+- Clearer security guidance during interactive wizard
 
 ## [2.1.0] - 2024-12-15
 

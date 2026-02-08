@@ -226,13 +226,21 @@ The script performs a complete WordPress migration in the following steps:
 
 **The script prioritizes security in all operations:**
 
-- **SSH Key Authentication**: Preferred method with no passwords transmitted or stored
+- **SSH Key Authentication**: Strongly recommended - no passwords transmitted or stored
+- **SSH Password Authentication**: Available but less secure - use only when SSH keys aren't possible
 - **Secure Password Handling**: SSH passwords use environment variables to avoid process list exposure
 - **rclone Credential Management**: SSH credentials stored securely in rclone config
 - **Runtime Credential Extraction**: Database passwords never stored in config files
-- **Secure Config Files**: Migration configs have 600 permissions
+- **Secure Config Files**: Migration configs have 600 permissions and are validated on load
 - **Connection Validation**: Tests all connections before migration
 - **Encrypted Transfers**: All data transmitted over encrypted SSH connections
+
+**Security Best Practices:**
+- Always use SSH key authentication when possible
+- Keep config files with 600 permissions (owner read/write only)
+- Never commit config files to version control
+- Use separate SSH keys for different environments
+- Regularly rotate SSH keys and passwords
 
 ## Command Reference
 

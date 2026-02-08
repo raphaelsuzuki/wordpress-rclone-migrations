@@ -538,7 +538,10 @@ run_wizard() {
     if [[ "$USE_SSH_KEY" == "true" ]]; then
         read -p "SSH key path: " -e -i "$HOME/.ssh/id_rsa" DEST_SSH_KEY
         DEST_SSH_PASS=""
+        log_info "Using SSH key authentication (recommended for security)"
     else
+        log_warning "SSH password authentication is less secure than SSH keys"
+        log_info "Consider using SSH key authentication for better security"
         read -p "SSH password: " -s DEST_SSH_PASS
         echo
         DEST_SSH_KEY=""
@@ -592,8 +595,11 @@ run_wizard() {
     
     # Generate config filename
     local site_hash=$(generate_hash)
-    local src_domain=$(echo "$SOURCE_URL" | sed 's|https\?://||' | sed 's|/.*||')
-    local dest_domain=$(echo "$DEST_URL" | sed 's|https\?://||' | sed 's|/.*||')
+    # Use bash parameter expansion instead of sed
+    local src_domain="${SOURCE_URL#*://}"  # Remove protocol
+    src_domain="${src_domain%%/*}"          # Remove path
+    local dest_domain="${DEST_URL#*://}"
+    dest_domain="${dest_domain%%/*}"
     CONFIG_FILE="$src_domain-to-$dest_domain-$site_hash"
     local config_path="$CONFIG_DIR/$CONFIG_FILE"
     
