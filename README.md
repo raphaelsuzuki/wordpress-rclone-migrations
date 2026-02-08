@@ -171,6 +171,12 @@ src_themes_dir=/custom/themes
 dest_uploads_dir=/var/www/site/uploads
 dest_plugins_dir=/var/www/site/plugins
 dest_themes_dir=/var/www/site/themes
+
+# Search and replace patterns during database migration
+[search_replace]
+patterns=https://site.dev|https://site.com
+patterns=/local/path|/remote/path
+patterns=dev.domain.com|domain.com
 ```
 
 **Note**: Database operations use WP-CLI which automatically reads credentials from wp-config.php files.
@@ -278,6 +284,27 @@ dest_themes_dir=/var/www/themes
 - `UPLOADS` - Custom uploads directory
 
 **Automatic fallbacks**: Uses standard `wp-content/` subdirectories if not specified
+
+### Configurable Search and Replace
+
+Beyond URL replacement, you can define multiple search and replace patterns for database migration:
+
+**In config file**: Add `[search_replace]` section with custom patterns:
+```ini
+[search_replace]
+patterns=https://site.dev|https://site.com
+patterns=/local/path|/remote/path
+patterns=dev.domain.com|domain.com
+patterns=staging.site.com|site.com
+```
+
+**Default behavior**: URL replacement is automatically included based on source_url and destination_url
+
+**Use cases**:
+- Replace development/staging URLs with production URLs
+- Update file paths that differ between environments
+- Replace domain names in serialized data
+- Update API endpoints or service URLs
 
 ## Advanced Configuration
 

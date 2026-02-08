@@ -654,6 +654,17 @@ EOF
         [[ -n "$DEST_THEMES_CUSTOM" ]] && echo "dest_themes_dir=$DEST_THEMES_CUSTOM" >> "$config_path"
     fi
     
+    # Add search and replace section with default URL replacement
+    cat >> "$config_path" << EOF
+
+# Search and replace patterns during database migration
+# Format: patterns=search_text|replacement_text
+# SECURITY: Do not include special characters: \$ \` ; & > < '
+# Maximum length: 500 characters per pattern
+[search_replace]
+patterns=$SOURCE_URL|$DEST_URL
+EOF
+    
     # Set secure permissions
     chmod 600 "$config_path"
     
@@ -713,6 +724,28 @@ load_config() {
                     ;;
                 "paths")
                     declare -g "${key}"="$value"
+                    ;;
+                "search_replace")
+                    # Parse pipe-separated search/replace patterns
+                    if [[ "$key" == "patterns" ]]; then
+                        [[ -z "${search_replace_pairs:-}" ]] && declare -gA search_replace_pairs
+                        
+                        # Split on pipe character
+                        if [[ "$value" == *"|"* ]]; then
+                            local search_text="${value%%|*}"
+                            local replace_text="${value#*|}"
+                            
+                            # Basic validation during config loading
+                            if [[ ${#search_text} -gt 500 || ${#replace_text} -gt 500 ]]; then
+                                log_warning "Skipping oversized search/replace pattern: ${search_text:0:50}..."
+                                continue
+                            fi
+                            
+                            search_replace_pairs["$search_text"]="$replace_text"
+                        else
+                            log_warning "Invalid search/replace pattern format (missing |): $value"
+                        fi
+                    fi
                     ;;
             esac
         fi
@@ -840,52 +873,97 @@ import_database_wpcli() {
     log_success "Database imported successfully"
 }
 
-# Replace URLs in database using WP-CLI
+# Validate search/replace input for security
+validate_search_replace_input() {
+    local input="$1"
+    local type="$2"  # "search" or "replace"
+    
+    # Check for dangerous characters that could cause command injection
+    if [[ "$input" =~ [\$\`\;\&\>\<] ]]; then
+        log_error "Invalid character in $type text: $input"
+        log_error "Search/replace patterns cannot contain: $ ` ; & > <"
+        return 1
+    fi
+    
+    # Check for single quotes (WP-CLI uses single quotes)
+    if [[ "$input" == *"'"* ]]; then
+        log_error "Single quotes not allowed in $type text: $input"
+        return 1
+    fi
+    
+    # Check length (prevent extremely long inputs)
+    if [[ ${#input} -gt 500 ]]; then
+        log_error "$type text too long (max 500 characters): $input"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Replace URLs and other patterns in database using WP-CLI
 replace_urls() {
     local wp_root="$1"
-    local old_url="$2"
-    local new_url="$3"
-    local ssh_host="$4"
-    local ssh_user="$5"
-    local ssh_key="$6"
-    local use_ssh_key="$7"
-    local ssh_pass="$8"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
     
-    log_info "Replacing URLs: $old_url -> $new_url"
+    log_info "Running search and replace operations"
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would replace URLs using WP-CLI"
+        log_info "[DRY RUN] Would run search and replace using WP-CLI"
+        for search_text in "${!search_replace_pairs[@]}"; do
+            local replace_text="${search_replace_pairs[$search_text]}"
+            log_info "[DRY RUN] Would replace: $search_text -> $replace_text"
+        done
         return 0
     fi
     
-    local replace_cmd="cd '$wp_root' && wp search-replace '$old_url' '$new_url' --skip-columns=guid"
+    # Process each search/replace pair
+    for search_text in "${!search_replace_pairs[@]}"; do
+        local replace_text="${search_replace_pairs[$search_text]}"
+        
+        # Validate inputs for security
+        if ! validate_search_replace_input "$search_text" "search"; then
+            log_error "Skipping unsafe search pattern: $search_text"
+            continue
+        fi
+        
+        if ! validate_search_replace_input "$replace_text" "replace"; then
+            log_error "Skipping unsafe replace pattern: $replace_text"
+            continue
+        fi
+        
+        log_info "Replacing: $search_text -> $replace_text"
+        
+        # Use printf to safely escape the command
+        local replace_cmd
+        printf -v replace_cmd "cd %q && wp search-replace %q %q --skip-columns=guid" "$wp_root" "$search_text" "$replace_text"
+        
+        if [[ -n "$ssh_host" ]]; then
+            # Remote replacement
+            if [[ "$use_ssh_key" == "true" ]]; then
+                if ! ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$replace_cmd"; then
+                    log_error "Remote WP-CLI search-replace failed for: $search_text"
+                    return 1
+                fi
+            else
+                if ! SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$replace_cmd"; then
+                    log_error "Remote WP-CLI search-replace failed for: $search_text"
+                    return 1
+                fi
+            fi
+        else
+            # Local replacement
+            if ! (cd "$wp_root" && wp search-replace "$search_text" "$replace_text" --skip-columns=guid); then
+                log_error "Local WP-CLI search-replace failed for: $search_text"
+                return 1
+            fi
+        fi
+    done
     
-    if [[ -n "$ssh_host" ]]; then
-        # Remote URL replacement
-        if [[ "$use_ssh_key" == "true" ]]; then
-            if ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$replace_cmd"; then
-                log_success "URL replacement completed using remote WP-CLI"
-            else
-                log_error "Remote WP-CLI search-replace failed"
-                return 1
-            fi
-        else
-            if SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$replace_cmd"; then
-                log_success "URL replacement completed using remote WP-CLI"
-            else
-                log_error "Remote WP-CLI search-replace failed"
-                return 1
-            fi
-        fi
-    else
-        # Local URL replacement
-        if (cd "$wp_root" && wp search-replace "$old_url" "$new_url" --skip-columns=guid); then
-            log_success "URL replacement completed using local WP-CLI"
-        else
-            log_error "Local WP-CLI search-replace failed"
-            return 1
-        fi
-    fi
+    log_success "All search and replace operations completed"
 }
 
 # Fix file permissions
@@ -1048,8 +1126,8 @@ run_migration() {
         # Import to destination database
         import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"
         
-        # Replace URLs using WP-CLI
-        replace_urls "$DEST_ROOT" "$OLD_URL" "$NEW_URL" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
+        # Replace URLs and other patterns using WP-CLI
+        replace_urls "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
         
         # Clean up database file
         if [[ "$DRY_RUN" != "true" ]]; then
