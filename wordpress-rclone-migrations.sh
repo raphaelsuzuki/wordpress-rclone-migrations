@@ -11,7 +11,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wordpress-rclone-migrations"
 CONFIG_DIR="$DEFAULT_CONFIG_DIR"
+
+# Create temp directory with secure permissions
+OLD_UMASK=$(umask)
+umask 077
 TEMP_DIR="$(mktemp -d)"
+umask "$OLD_UMASK"
+
 ACTION=""
 SUBCOMMAND=""
 SKIP_CONFIRMATION=false
@@ -605,7 +611,10 @@ run_wizard() {
         exit 1
     fi
     
-    # Create config file (without database credentials)
+    # Create config file with secure permissions from the start
+    OLD_UMASK=$(umask)
+    umask 077
+    
     cat > "$config_path" << EOF
 # WordPress Migration Configuration
 # Generated: $(date)
@@ -640,6 +649,11 @@ rclone_flags=--transfers=4 --checkers=8 --progress
 last_sync=never
 EOF
     
+    umask "$OLD_UMASK"
+    
+    # Verify secure permissions (defense in depth)
+    chmod 600 "$config_path"
+    
     # Add custom paths section if any custom paths were specified
     if [[ -n "$SRC_UPLOADS_CUSTOM" || -n "$SRC_PLUGINS_CUSTOM" || -n "$SRC_THEMES_CUSTOM" || -n "$DEST_UPLOADS_CUSTOM" || -n "$DEST_PLUGINS_CUSTOM" || -n "$DEST_THEMES_CUSTOM" ]]; then
         cat >> "$config_path" << EOF
@@ -652,6 +666,8 @@ EOF
         [[ -n "$DEST_UPLOADS_CUSTOM" ]] && echo "dest_uploads_dir=$DEST_UPLOADS_CUSTOM" >> "$config_path"
         [[ -n "$DEST_PLUGINS_CUSTOM" ]] && echo "dest_plugins_dir=$DEST_PLUGINS_CUSTOM" >> "$config_path"
         [[ -n "$DEST_THEMES_CUSTOM" ]] && echo "dest_themes_dir=$DEST_THEMES_CUSTOM" >> "$config_path"
+        # Ensure permissions remain secure after append
+        chmod 600 "$config_path"
     fi
     
     # Add search and replace section with default URL replacement
@@ -665,7 +681,7 @@ EOF
 patterns=$SOURCE_URL|$DEST_URL
 EOF
     
-    # Set secure permissions
+    # Ensure final permissions are secure
     chmod 600 "$config_path"
     
     log_success "Configuration saved: $CONFIG_FILE"
@@ -687,6 +703,15 @@ load_config() {
     
     if [[ ! -f "$config_path" ]]; then
         log_error "Configuration file not found: $config_path"
+        exit 1
+    fi
+    
+    # Validate config file permissions for security
+    local config_perms=$(stat -c %a "$config_path" 2>/dev/null || stat -f %A "$config_path" 2>/dev/null || echo "000")
+    if [[ ! "$config_perms" =~ ^[0-7]00$ ]]; then
+        log_error "Configuration file has insecure permissions: $config_perms"
+        log_error "Config file should not be readable by group or others"
+        log_info "Fix with: chmod 600 '$config_path'"
         exit 1
     fi
     
@@ -881,7 +906,7 @@ validate_search_replace_input() {
     # Check for dangerous characters that could cause command injection
     if [[ "$input" =~ [\$\`\;\&\>\<] ]]; then
         log_error "Invalid character in $type text: $input"
-        log_error "Search/replace patterns cannot contain: $ ` ; & > <"
+        log_error "Search/replace patterns cannot contain: \$ \` ; & > <"
         return 1
     fi
     

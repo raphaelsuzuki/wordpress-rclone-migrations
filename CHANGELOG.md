@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2025-02-08
+
+### Security
+- **CRITICAL**: Eliminated race condition in temp directory creation by setting umask 077 before mktemp
+- **CRITICAL**: Eliminated race condition in config file creation by setting umask 077 before writing
+- **CRITICAL**: Added config file permission validation when loading (must be mode 600)
+- Fixed syntax error in validate_search_replace_input error message (unescaped backtick)
+- Enhanced defense-in-depth with explicit chmod after config file operations
+
+### Improved
+- Config files now created with secure permissions from the start
+- Better error messages for insecure config file permissions
+- More robust permission handling throughout config lifecycle
+
 ## [2.1.0] - 2024-12-15
 
 ### Added
