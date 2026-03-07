@@ -22,6 +22,7 @@ ACTION=""
 SUBCOMMAND=""
 SKIP_CONFIRMATION=false
 DRY_RUN=false
+REVERSE=false
 
 CONFIG_FILE=""
 LOG_FILE=""
@@ -36,11 +37,32 @@ NC='\033[0m' # No Color
 
 # Cleanup function
 cleanup() {
+    local exit_code=$?
     remove_lock_dir
     [[ -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
-    [[ -n "$LOG_FILE" ]] && log_to_file "INFO" "=== WordPress Migration Ended ==="
+    [[ -n "$LOG_FILE" ]] && log_to_file "INFO" "=== WordPress Migration Ended with exit code: $exit_code ==="
 }
+
+# Error handler for unexpected failures
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    log_error "Unexpected error on line $line_no (exit code: $error_code)"
+    log_error "Cleaning up..."
+    
+    # Try to remove temp files but keep lock for debugging
+    [[ -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
+    
+    if [[ -n "$LOG_FILE" ]]; then
+        log_to_file "ERROR" "Script failed on line $line_no with exit code $error_code"
+        log_to_file "INFO" "Check log file for details: $LOG_FILE"
+    fi
+    
+    exit "$error_code"
+}
+
 trap cleanup EXIT
+trap 'error_handler $LINENO $?' ERR
 
 # Logging functions
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; log_to_file "INFO" "$1"; }
@@ -195,22 +217,136 @@ validate_permissions() {
     fi
 }
 
+validate_paths_exist() {
+    local src_path="$1"
+    local dest_path="$2"
+    local src_ssh_host="$3"
+    local dest_ssh_host="$4"
+    local src_ssh_user="$5"
+    local dest_ssh_user="$6"
+    local src_ssh_key="$7"
+    local dest_ssh_key="$8"
+    local src_use_ssh_key="$9"
+    local dest_use_ssh_key="${10}"
+    local src_ssh_pass="${11}"
+    local dest_ssh_pass="${12}"
+    
+    log_info "Validating source and destination paths exist"
+    
+    # Check source path
+    if [[ -n "$src_ssh_host" ]]; then
+        if [[ "$src_use_ssh_key" == "true" ]]; then
+            if ! ssh -i "$src_ssh_key" "$src_ssh_user@$src_ssh_host" "test -d '$src_path'" &>/dev/null; then
+                log_error "Source path does not exist: $src_ssh_host:$src_path"
+                return 1
+            fi
+        else
+            if ! SSHPASS="$src_ssh_pass" sshpass -e ssh "$src_ssh_user@$src_ssh_host" "test -d '$src_path'" &>/dev/null; then
+                log_error "Source path does not exist: $src_ssh_host:$src_path"
+                return 1
+            fi
+        fi
+    else
+        if [[ ! -d "$src_path" ]]; then
+            log_error "Source path does not exist: $src_path"
+            return 1
+        fi
+    fi
+    
+    # Check destination path
+    if [[ -n "$dest_ssh_host" ]]; then
+        if [[ "$dest_use_ssh_key" == "true" ]]; then
+            if ! ssh -i "$dest_ssh_key" "$dest_ssh_user@$dest_ssh_host" "test -d '$dest_path'" &>/dev/null; then
+                log_error "Destination path does not exist: $dest_ssh_host:$dest_path"
+                return 1
+            fi
+        else
+            if ! SSHPASS="$dest_ssh_pass" sshpass -e ssh "$dest_ssh_user@$dest_ssh_host" "test -d '$dest_path'" &>/dev/null; then
+                log_error "Destination path does not exist: $dest_ssh_host:$dest_path"
+                return 1
+            fi
+        fi
+    else
+        if [[ ! -d "$dest_path" ]]; then
+            log_error "Destination path does not exist: $dest_path"
+            return 1
+        fi
+    fi
+    
+    log_success "Path validation passed"
+    return 0
+}
+
 run_preflight_checks() {
     log_info "Running pre-flight validation checks..."
     
     # Estimate required space (conservative: 1GB for safety)
     local required_space_mb=1024
     
+    # Determine source and destination based on action
+    local check_src_wp_root check_dest_wp_root
+    local check_src_wp_content check_dest_wp_content
+    local check_src_ssh_host check_dest_ssh_host
+    local check_src_ssh_user check_dest_ssh_user
+    local check_src_ssh_key check_dest_ssh_key
+    local check_src_use_ssh_key check_dest_use_ssh_key
+    local check_src_ssh_pass check_dest_ssh_pass
+    
     if [[ "$ACTION" == "pull" ]]; then
-        # Pull operation: check local space and permissions
+        # Pull: remote -> local
+        check_src_wp_root="$dest_wp_root"
+        check_dest_wp_root="$src_wp_root"
+        check_src_wp_content="$dest_wp_content"
+        check_dest_wp_content="$src_wp_content"
+        check_src_ssh_host="$dest_ssh_host"
+        check_dest_ssh_host=""
+        check_src_ssh_user="$dest_ssh_user"
+        check_dest_ssh_user=""
+        check_src_ssh_key="$dest_ssh_key"
+        check_dest_ssh_key=""
+        check_src_use_ssh_key="$dest_use_ssh_key"
+        check_dest_use_ssh_key="false"
+        check_src_ssh_pass="${dest_ssh_pass:-}"
+        check_dest_ssh_pass=""
+        
         if ! validate_disk_space "$src_wp_root" $required_space_mb; then
             return 1
         fi
+    else
+        # Push: local -> remote
+        check_src_wp_root="$src_wp_root"
+        check_dest_wp_root="$dest_wp_root"
+        check_src_wp_content="$src_wp_content"
+        check_dest_wp_content="$dest_wp_content"
+        check_src_ssh_host=""
+        check_dest_ssh_host="$dest_ssh_host"
+        check_src_ssh_user=""
+        check_dest_ssh_user="$dest_ssh_user"
+        check_src_ssh_key=""
+        check_dest_ssh_key="$dest_ssh_key"
+        check_src_use_ssh_key="false"
+        check_dest_use_ssh_key="$dest_use_ssh_key"
+        check_src_ssh_pass=""
+        check_dest_ssh_pass="${dest_ssh_pass:-}"
+    fi
+    
+    # Validate paths exist
+    if ! validate_paths_exist \
+        "$check_src_wp_content" "$check_dest_wp_content" \
+        "$check_src_ssh_host" "$check_dest_ssh_host" \
+        "$check_src_ssh_user" "$check_dest_ssh_user" \
+        "$check_src_ssh_key" "$check_dest_ssh_key" \
+        "$check_src_use_ssh_key" "$check_dest_use_ssh_key" \
+        "$check_src_ssh_pass" "$check_dest_ssh_pass"; then
+        return 1
+    fi
+    
+    # Validate write permissions
+    if [[ "$ACTION" == "pull" ]]; then
         if ! validate_permissions "$src_wp_content" "" "" "" "" ""; then
             return 1
         fi
     else
-        # Push operation: check remote space and permissions
         if ! validate_permissions "$dest_wp_content" "$dest_ssh_host" "$dest_ssh_user" "$dest_ssh_key" "$dest_use_ssh_key" "${dest_ssh_pass:-}"; then
             return 1
         fi
@@ -790,6 +926,13 @@ load_config() {
     [[ -z "${dest_plugins_dir:-}" ]] && dest_plugins_dir="$dest_wp_content/plugins"
     [[ -z "${dest_themes_dir:-}" ]] && dest_themes_dir="$dest_wp_content/themes"
     
+    # Initialize optional SSH password variables (avoid unbound variable errors)
+    [[ -z "${dest_ssh_pass:-}" ]] && dest_ssh_pass=""
+    [[ -z "${src_ssh_pass:-}" ]] && src_ssh_pass=""
+    [[ -z "${rclone_flags:-}" ]] && rclone_flags="--transfers=4 --checkers=8 --progress"
+    [[ -z "${fix_permissions:-}" ]] && fix_permissions="true"
+    [[ -z "${sync_wp_config:-}" ]] && sync_wp_config="false"
+    
     log_info "Loaded configuration: $CONFIG_FILE"
     
     # Test WP-CLI database connections
@@ -902,6 +1045,67 @@ import_database_wpcli() {
     fi
     
     log_success "Database imported successfully"
+}
+
+# Backup database before migration (for rollback)
+backup_database() {
+    local wp_root="$1"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
+    local backup_suffix="$7"
+    
+    log_info "Creating database backup before migration"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would create database backup"
+        return 0
+    fi
+    
+    local backup_file="database_backup_${backup_suffix}.sql.gz"
+    local backup_cmd="cd '$wp_root' && wp db export --gzip '$backup_file'"
+    
+    if [[ -n "$ssh_host" ]]; then
+        if [[ "$use_ssh_key" == "true" ]]; then
+            ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$backup_cmd"
+        else
+            SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$backup_cmd"
+        fi
+    else
+        (cd "$wp_root" && wp db export --gzip "$backup_file")
+    fi
+    
+    log_success "Database backup created: $backup_file"
+    echo "$backup_file"
+}
+
+# Restore database from backup
+restore_database() {
+    local wp_root="$1"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
+    local backup_file="$7"
+    
+    log_warning "Restoring database from backup: $backup_file"
+    
+    local restore_cmd="cd '$wp_root' && wp db import '$backup_file'"
+    
+    if [[ -n "$ssh_host" ]]; then
+        if [[ "$use_ssh_key" == "true" ]]; then
+            ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$restore_cmd"
+        else
+            SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$restore_cmd"
+        fi
+    else
+        (cd "$wp_root" && wp db import "$backup_file")
+    fi
+    
+    log_success "Database restored from backup"
 }
 
 # Validate search/replace input for security
@@ -1140,6 +1344,8 @@ run_migration() {
     # Database migration (skip if files-only)
     if [[ "$sync_type" != "media" && "$sync_type" != "plugins" && "$sync_type" != "themes" ]]; then
         local db_dump="database.sql.gz"
+        local backup_timestamp=$(date '+%Y%m%d_%H%M%S')
+        local db_backup_file=""
         
         # Export source database
         export_database_wpcli "$SRC_ROOT" "$SRC_SSH_HOST" "$SRC_SSH_USER" "$SRC_SSH_KEY" "$SRC_USE_SSH_KEY" "$SRC_SSH_PASS" "$db_dump"
@@ -1154,13 +1360,50 @@ run_migration() {
             rclone copy "$SRC_ROOT/$db_dump" "$rclone_remote:"
         fi
         
-        # Import to destination database
-        import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"
+        # Create backup of destination database before import (for rollback)
+        if [[ "$DRY_RUN" != "true" ]]; then
+            db_backup_file=$(backup_database "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$backup_timestamp")
+            
+            # Transfer backup to local temp for safety
+            if [[ -n "$DEST_SSH_HOST" ]]; then
+                if [[ "$DEST_USE_SSH_KEY" == "true" ]]; then
+                    rclone copy "$DEST_SSH_HOST:$DEST_ROOT/$db_backup_file" "$TEMP_DIR/"
+                else
+                    rclone copy "$DEST_SSH_HOST:$DEST_ROOT/$db_backup_file" "$TEMP_DIR/"
+                fi
+            fi
+        fi
+        
+        # Import to destination database with error handling and rollback
+        local import_failed=false
+        if ! import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"; then
+            import_failed=true
+        fi
+        
+        # If import failed, restore from backup
+        if [[ "$import_failed" == "true" && "$DRY_RUN" != "true" ]]; then
+            log_error "Database import failed - attempting rollback"
+            
+            # Restore from backup
+            if [[ -n "$DEST_SSH_HOST" ]]; then
+                # Copy backup from temp to remote if needed
+                if [[ -f "$TEMP_DIR/$db_backup_file" ]]; then
+                    rclone copy "$TEMP_DIR/$db_backup_file" "$DEST_SSH_HOST:$DEST_ROOT/"
+                fi
+                restore_database "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_backup_file"
+            else
+                # Local restore
+                restore_database "$DEST_ROOT" "" "" "" "" "" "$db_backup_file"
+            fi
+            
+            log_error "Database restored from backup. Please check the source database and try again."
+            exit 1
+        fi
         
         # Replace URLs and other patterns using WP-CLI
         replace_urls "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
         
-        # Clean up database file
+        # Clean up database files
         if [[ "$DRY_RUN" != "true" ]]; then
             if [[ -n "$DEST_SSH_HOST" ]]; then
                 # Remove from remote server
