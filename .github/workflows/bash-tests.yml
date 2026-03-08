@@ -1,0 +1,28 @@
+name: Bash Quality
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats shellcheck
+
+      - name: Syntax check
+        run: bash -n wordpress-rclone-migrations.sh
+
+      - name: ShellCheck
+        run: shellcheck wordpress-rclone-migrations.sh
+
+      - name: Run Bats tests
+        run: bats --tap tests/migration_tests.bats
