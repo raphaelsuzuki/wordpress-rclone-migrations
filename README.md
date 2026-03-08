@@ -56,6 +56,14 @@ This script provides a complete WordPress migration solution that handles both f
 - **WordPress Configuration**: Valid wp-config.php files required for database operations
 - **SSH Password Auth**: Requires `sshpass` package if not using SSH keys
 
+## Operational Assumptions
+
+- **Remote Path Semantics**: The configured `rclone_remote` must point to the same host and filesystem used by SSH operations.
+- **Absolute Path Access**: `rclone` SFTP access must support absolute paths (for example `/tmp/...` backup files).
+- **Temp Directory Permissions**: The SSH user must have read/write access to `${TMPDIR:-/tmp}` on both local and remote systems.
+- **Tool Consistency**: `wp-cli`, `mktemp`, and shell behavior are expected to be standard POSIX-like on source and destination hosts.
+- **Rollback Scope**: Automatic rollback covers database import and search/replace failures; file sync rollback is not attempted.
+
 ## Usage
 
 1. **Run the wizard** to create a migration configuration:
@@ -197,6 +205,9 @@ The script performs a complete WordPress migration in the following steps:
 - **WP-CLI export/import**: Uses `wp db export` and `wp db import` for all database operations
 - **Automatic compression**: Built-in gzip compression for efficient transfers
 - **WordPress-native**: Handles WordPress database specifics automatically
+- **Pre-import backup**: Creates a destination database backup in a temporary directory before mutation
+- **Rollback on DB mutation failure**: Restores destination database if import or URL replacement fails
+- **Backup cleanup**: Removes temporary backup dumps after success and after completed rollback
 - **URL replacement**: Updates all WordPress URLs using WP-CLI:
   - Uses `wp search-replace` for proper serialized data handling
   - Updates `wp_options`, `wp_posts`, `wp_comments`, `wp_postmeta`
