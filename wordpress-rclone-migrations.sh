@@ -5,7 +5,7 @@
 # Usage: ./script [push|pull] [subcommand] [options] [config-file]
 # No args: Run migration wizard to create config
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # Global variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
