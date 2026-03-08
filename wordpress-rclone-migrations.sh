@@ -1382,35 +1382,35 @@ run_migration() {
             src_path="$SRC_UPLOADS"
             if [[ "$REVERSE" == "true" ]]; then
                 dest_path="$DEST_UPLOADS"
-                sync_files "$rclone_remote:$src_path" "$dest_path"
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
             else
                 dest_path="$DEST_UPLOADS"
-                sync_files "$src_path" "$rclone_remote:$dest_path"
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
             fi
         elif [[ "$sync_type" == "plugins" ]]; then
             src_path="$SRC_PLUGINS"
             if [[ "$REVERSE" == "true" ]]; then
                 dest_path="$DEST_PLUGINS"
-                sync_files "$rclone_remote:$src_path" "$dest_path"
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
             else
                 dest_path="$DEST_PLUGINS"
-                sync_files "$src_path" "$rclone_remote:$dest_path"
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
             fi
         elif [[ "$sync_type" == "themes" ]]; then
             src_path="$SRC_THEMES"
             if [[ "$REVERSE" == "true" ]]; then
                 dest_path="$DEST_THEMES"
-                sync_files "$rclone_remote:$src_path" "$dest_path"
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
             else
                 dest_path="$DEST_THEMES"
-                sync_files "$src_path" "$rclone_remote:$dest_path"
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
             fi
         else
             # Full file sync
             if [[ "$REVERSE" == "true" ]]; then
-                sync_files "$rclone_remote:$src_path" "$dest_path"
+                sync_files "$dest_rclone_remote:$src_path" "$dest_path"
             else
-                sync_files "$src_path" "$rclone_remote:$dest_path"
+                sync_files "$src_path" "$dest_rclone_remote:$dest_path"
             fi
         fi
     fi
@@ -1428,11 +1428,11 @@ run_migration() {
         # Transfer database file if needed
         if [[ "$REVERSE" == "true" ]]; then
             # Transfer from remote to local
-            rclone copy "$rclone_remote:$db_dump" "$TEMP_DIR/"
+            rclone copy "$dest_rclone_remote:$db_dump" "$TEMP_DIR/"
             mv "$TEMP_DIR/$db_dump" "$DEST_ROOT/$db_dump"
         else
             # Transfer from local to remote
-            rclone copy "$SRC_ROOT/$db_dump" "$rclone_remote:"
+            rclone copy "$SRC_ROOT/$db_dump" "$dest_rclone_remote:"
         fi
         
         # Create backup of destination database before import (for rollback)
@@ -1441,7 +1441,7 @@ run_migration() {
             
             # Transfer backup to local temp for safety
             if [[ -n "$DEST_SSH_HOST" ]]; then
-                rclone copy "$rclone_remote:$db_backup_file" "$TEMP_DIR/"
+                rclone copy "$dest_rclone_remote:$db_backup_file" "$TEMP_DIR/"
                 temp_backup_copy="$TEMP_DIR/$(basename "$db_backup_file")"
             fi
         fi
@@ -1461,7 +1461,7 @@ run_migration() {
             if ! rollback_destination_db \
                 "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" \
                 "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_backup_file" \
-                "$temp_backup_copy" "$rclone_remote"; then
+                "$temp_backup_copy" "$dest_rclone_remote"; then
                 exit 1
             fi
             
