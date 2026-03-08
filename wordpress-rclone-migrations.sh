@@ -1057,15 +1057,29 @@ backup_database() {
     local ssh_pass="$6"
     local backup_suffix="$7"
     
-    log_info "Creating database backup before migration"
+    log_info "Creating database backup before migration" >&2
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create database backup"
+        log_info "[DRY RUN] Would create database backup" >&2
         return 0
     fi
     
-    local backup_file="database_backup_${backup_suffix}.sql.gz"
-    local backup_cmd="cd '$wp_root' && wp db export --gzip '$backup_file'"
+    # Store backup outside document root and return absolute path for safe cleanup.
+    local backup_file=""
+    local backup_tmp_dir="${TMPDIR:-/tmp}"
+
+    if [[ -n "$ssh_host" ]]; then
+        local remote_mktemp_cmd="mktemp -p '$backup_tmp_dir' 'database_backup_${backup_suffix}_XXXX.sql.gz'"
+        if [[ "$use_ssh_key" == "true" ]]; then
+            backup_file=$(ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$remote_mktemp_cmd")
+        else
+            backup_file=$(SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$remote_mktemp_cmd")
+        fi
+    else
+        backup_file=$(mktemp -p "$backup_tmp_dir" "database_backup_${backup_suffix}_XXXX.sql.gz")
+    fi
+
+    local backup_cmd="cd '$wp_root' && wp db export --gzip '$backup_file' >/dev/null"
     
     if [[ -n "$ssh_host" ]]; then
         if [[ "$use_ssh_key" == "true" ]]; then
@@ -1074,11 +1088,11 @@ backup_database() {
             SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$backup_cmd"
         fi
     else
-        (cd "$wp_root" && wp db export --gzip "$backup_file")
+        (cd "$wp_root" && wp db export --gzip "$backup_file" >/dev/null)
     fi
     
-    log_success "Database backup created: $backup_file"
-    echo "$backup_file"
+    log_success "Database backup created: $backup_file" >&2
+    printf '%s\n' "$backup_file"
 }
 
 # Restore database from backup
@@ -1106,6 +1120,66 @@ restore_database() {
     fi
     
     log_success "Database restored from backup"
+}
+
+# Remove backup dump after migration completes or rollback finishes.
+cleanup_backup_file() {
+    local wp_root="$1"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
+    local backup_file="$7"
+
+    [[ -z "$backup_file" || "$DRY_RUN" == "true" ]] && return 0
+
+    local cleanup_cmd="cd '$wp_root' && rm -f '$backup_file'"
+
+    if [[ -n "$ssh_host" ]]; then
+        if [[ "$use_ssh_key" == "true" ]]; then
+            if ! ssh -i "$ssh_key" "$ssh_user@$ssh_host" "$cleanup_cmd"; then
+                log_warning "Could not remove remote backup file: $backup_file"
+            fi
+        else
+            if ! SSHPASS="$ssh_pass" sshpass -e ssh "$ssh_user@$ssh_host" "$cleanup_cmd"; then
+                log_warning "Could not remove remote backup file: $backup_file"
+            fi
+        fi
+    else
+        if ! rm -f "$backup_file"; then
+            log_warning "Could not remove local backup file: $backup_file"
+        fi
+    fi
+}
+
+# Perform rollback with best-effort backup recopy and guaranteed restore attempt.
+rollback_destination_db() {
+    local wp_root="$1"
+    local ssh_host="$2"
+    local ssh_user="$3"
+    local ssh_key="$4"
+    local use_ssh_key="$5"
+    local ssh_pass="$6"
+    local backup_file="$7"
+    local temp_backup_copy="$8"
+    local rclone_remote_name="$9"
+
+    if [[ -n "$ssh_host" && -n "$temp_backup_copy" && -f "$temp_backup_copy" ]]; then
+        if ! rclone copy "$temp_backup_copy" "$rclone_remote_name:$(dirname "$backup_file")/"; then
+            log_warning "Could not copy local backup cache back to remote; attempting restore from existing remote backup"
+        fi
+    fi
+
+    if ! restore_database "$wp_root" "$ssh_host" "$ssh_user" "$ssh_key" "$use_ssh_key" "$ssh_pass" "$backup_file"; then
+        log_error "Rollback failed: could not restore destination database from backup"
+        return 1
+    fi
+
+    cleanup_backup_file "$wp_root" "$ssh_host" "$ssh_user" "$ssh_key" "$use_ssh_key" "$ssh_pass" "$backup_file"
+    [[ -n "$temp_backup_copy" ]] && rm -f "$temp_backup_copy"
+
+    return 0
 }
 
 # Validate search/replace input for security
@@ -1346,6 +1420,7 @@ run_migration() {
         local db_dump="database.sql.gz"
         local backup_timestamp=$(date '+%Y%m%d_%H%M%S')
         local db_backup_file=""
+        local temp_backup_copy=""
         
         # Export source database
         export_database_wpcli "$SRC_ROOT" "$SRC_SSH_HOST" "$SRC_SSH_USER" "$SRC_SSH_KEY" "$SRC_USE_SSH_KEY" "$SRC_SSH_PASS" "$db_dump"
@@ -1366,42 +1441,35 @@ run_migration() {
             
             # Transfer backup to local temp for safety
             if [[ -n "$DEST_SSH_HOST" ]]; then
-                if [[ "$DEST_USE_SSH_KEY" == "true" ]]; then
-                    rclone copy "$DEST_SSH_HOST:$DEST_ROOT/$db_backup_file" "$TEMP_DIR/"
-                else
-                    rclone copy "$DEST_SSH_HOST:$DEST_ROOT/$db_backup_file" "$TEMP_DIR/"
-                fi
+                rclone copy "$rclone_remote:$db_backup_file" "$TEMP_DIR/"
+                temp_backup_copy="$TEMP_DIR/$(basename "$db_backup_file")"
             fi
         fi
         
-        # Import to destination database with error handling and rollback
-        local import_failed=false
+        # Import to destination database and run post-import DB mutations.
+        local db_mutation_failed=false
         if ! import_database_wpcli "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_dump"; then
-            import_failed=true
+            db_mutation_failed=true
+        elif ! replace_urls "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"; then
+            db_mutation_failed=true
         fi
         
-        # If import failed, restore from backup
-        if [[ "$import_failed" == "true" && "$DRY_RUN" != "true" ]]; then
-            log_error "Database import failed - attempting rollback"
-            
-            # Restore from backup
-            if [[ -n "$DEST_SSH_HOST" ]]; then
-                # Copy backup from temp to remote if needed
-                if [[ -f "$TEMP_DIR/$db_backup_file" ]]; then
-                    rclone copy "$TEMP_DIR/$db_backup_file" "$DEST_SSH_HOST:$DEST_ROOT/"
-                fi
-                restore_database "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_backup_file"
-            else
-                # Local restore
-                restore_database "$DEST_ROOT" "" "" "" "" "" "$db_backup_file"
+        # If import/search-replace failed, restore from backup.
+        if [[ "$db_mutation_failed" == "true" && "$DRY_RUN" != "true" ]]; then
+            log_error "Database import/search-replace failed - attempting rollback"
+
+            if ! rollback_destination_db \
+                "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" \
+                "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_backup_file" \
+                "$temp_backup_copy" "$rclone_remote"; then
+                exit 1
             fi
             
             log_error "Database restored from backup. Please check the source database and try again."
             exit 1
         fi
-        
-        # Replace URLs and other patterns using WP-CLI
-        replace_urls "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS"
+
+        log_success "Database import and search/replace completed"
         
         # Clean up database files
         if [[ "$DRY_RUN" != "true" ]]; then
@@ -1419,6 +1487,10 @@ run_migration() {
             
             # Remove from source if local
             [[ -z "$SRC_SSH_HOST" ]] && rm -f "$SRC_ROOT/$db_dump"
+
+            # Remove destination backup dump from success path.
+            cleanup_backup_file "$DEST_ROOT" "$DEST_SSH_HOST" "$DEST_SSH_USER" "$DEST_SSH_KEY" "$DEST_USE_SSH_KEY" "$DEST_SSH_PASS" "$db_backup_file"
+            [[ -n "$temp_backup_copy" ]] && rm -f "$temp_backup_copy"
         fi
     fi
     
