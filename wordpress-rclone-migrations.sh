@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck disable=SC2154  # Config variables loaded dynamically via load_config()
+# shellcheck disable=SC2162  # read without -r is acceptable for interactive wizard prompts
 
 # WordPress Migration Script with rclone and SSH
 # Version: 2.0.0
